@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Aviator Pro Backend</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#030617; font-family:system-ui; color:#edf2ff; display:flex; justify-content:center; padding:10px 8px 30px; min-height:100vh; }
+    .app { max-width:520px; width:100%; background:#0b1124; border-radius:32px; padding:16px 14px 24px; box-shadow:0 20px 40px #000000c0; }
+    h2 { font-size:1rem; margin:14px 0 6px; color:#baccff; border-bottom:1px solid #1e3050; padding-bottom:4px; }
+    textarea, input[type="text"], input[type="number"] {
+      width:100%; background:#030a1c; border:1px solid #253656; color:#d0e0ff;
+      border-radius:14px; padding:10px; font-family:monospace; font-size:0.85rem; margin:6px 0;
+    }
+    textarea { height:70px; resize:vertical; }
+    .btn {
+      background:#1c2b4b; border:1px solid #2e4570; color:#d0e0ff;
+      padding:10px 14px; border-radius:30px; font-weight:600; font-size:0.8rem;
+      cursor:pointer; text-align:center; margin:4px 3px; display:inline-block;
+    }
+    .btn-primary { background:#0f3b8c; border-color:#2d5fd9; color:white; }
+    .btn:active { opacity:0.8; transform:scale(0.96); }
+    .stat-grid { display:flex; flex-wrap:wrap; gap:6px; }
+    .stat-item { flex:1 1 45%; background:#0f1a30; border-radius:14px; padding:8px; text-align:center; }
+    .pred-grid { display:flex; gap:8px; margin-top:6px; }
+    .pred-card { flex:1; background:#0a1229; border-radius:16px; padding:10px 4px; text-align:center; border:1px solid #2b3f68; }
+    .pred-card .mult { font-size:1.8rem; font-weight:800; color:#f5b042; }
+    .small { font-size:0.7rem; color:#7a8bb5; }
+    canvas { width:100%; border-radius:14px; background:#030617; margin-top:6px; }
+    .legend { display:flex; justify-content:space-between; font-size:0.65rem; color:#7a8bb5; margin-top:4px; }
+    hr { border-color:#1e3050; margin:12px 0; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <h1 style="font-size:1.8rem; background:linear-gradient(135deg,#b2d0ff,#4980f5); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">✈️ Aviator Pro API</h1>
+  
+  <h2>📸 Importer historique</h2>
+  <input type="file" id="imageInput" accept="image/*" style="display:none;">
+  <button class="btn" id="selectImageBtn">🖼️ Capture</button>
+  <button class="btn" id="ocrBtn" disabled>🔍 OCR</button>
+  <div id="ocrStatus" class="small"></div>
+  <textarea id="historyInput" placeholder="Coefficients...">2.16,4.68,1.86,6.53,2.03,3.95,1.27,1.12</textarea>
+  <button class="btn btn-primary" id="analyzeBtn" style="width:100%;">⚡ ANALYSER (via serveur)</button>
+
+  <h2>🕒 Paramètres</h2>
+  <input type="text" id="lastTimeInput" placeholder="Heure dernier tour (HH:MM)" value="15:09">
+  <input type="number" id="intervalInput" value="30" step="5" min="5">
+
+  <h2>📊 Résultats (backend)</h2>
+  <div class="stat-grid" id="statsContainer">
+    <!-- Rempli dynamiquement -->
+  </div>
+
+  <h2>🎯 Heures d'entrée estimées</h2>
+  <div class="pred-grid" id="predictionsContainer"></div>
+
+  <h2>🔥 Heatmap</h2>
+  <canvas id="heatmapCanvas" height="100"></canvas>
+  <div class="legend">
+    <span>🟢 1-2</span><span>🟡 2-4</span><span>🟠 4-8</span><span>🔴 8-15</span><span>🟣 15+</span>
+  </div>
+  <div class="small" style="text-align:center; margin-top:10px;">Backend FastAPI • Régression logistique • Pareto • Markov • Bayes • Poisson</div>
+</div>
+
+<script>
+// URL de votre API FastAPI (à modifier après déploiement)
+const API_URL = "https://votre-api.onrender.com/analyze"; // ← Remplacez par l'URL réelle
+
+// OCR
+const imageInput = document.getElementById('imageInput');
+const selectImageBtn = document.getElementById('selectImageBtn');
+const ocrBtn = document.getElementById('ocrBtn');
+const ocrStatus = document.getElementById('ocrStatus');
+const historyInput = document.getElementById('historyInput');
+const analyzeBtn = document.getElementById('analyzeBtn');
+
+selectImageBtn.addEventListener('click', ()=> imageInput.click());
+imageInput.addEventListener('change', (e)=> {
+  if (e.target.files.length) { ocrBtn.disabled = false; ocrStatus.textContent = "Image prête."; }
+});
+ocrBtn.addEventListener('click', async ()=>{
+  let file = imageInput.files[0];
+  if (!file) return;
+  ocrStatus.textContent = "OCR...";
+  ocrBtn.disabled = true;
+  try {
+    let { data: { text } } = await Tesseract.recognize(file, 'eng+fra');
+    let vals = text.match(/\d+[.,]\d+|\d+/g)?.map(s => parseFloat(s.replace(',','.'))).filter(n => n>=1 && n<=50) || [];
+    if (vals.length >= 3) {
+      historyInput.value = vals.join(',');
+      ocrStatus.textContent = `✅ ${vals.length} coeffs.`;
+    } else ocrStatus.textContent = "Pas assez de valeurs.";
+  } catch(e) { ocrStatus.textContent = "Erreur OCR."; }
+  ocrBtn.disabled = false;
+});
+
+// Analyse via API
+analyzeBtn.addEventListener('click', async () => {
+  let raw = historyInput.value.trim();
+  let coeffs = raw.match(/\d+[.,]\d+|\d+/g)?.map(s => parseFloat(s.replace(',','.'))).filter(n => n>=1 && n<=50);
+  if (!coeffs || coeffs.length < 3) { alert("3 coefficients minimum."); return; }
+
+  let lastTime = document.getElementById('lastTimeInput').value;
+  let interval = parseFloat(document.getElementById('intervalInput').value) || 30;
+
+  try {
+    let resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        coefficients: coeffs,
+        last_tour_time: lastTime || null,
+        interval_seconds: interval,
+        future_turns_poisson: 5
+      })
+    });
+    let data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Erreur');
+    displayResults(data);
+  } catch(e) {
+    alert("Erreur API : " + e.message);
+  }
+});
+
+function displayResults(d) {
+  // Stats
+  const statsDiv = document.getElementById('statsContainer');
+  statsDiv.innerHTML = `
+    <div class="stat-item">Volatilité: ${d.volatilite}</div>
+    <div class="stat-item">Espérance: ${d.esperance}</div>
+    <div class="stat-item">SMA 10: ${d.sma10 ?? '-'}</div>
+    <div class="stat-item">SMA 25: ${d.sma25 ?? '-'}</div>
+    <div class="stat-item">SMA 50: ${d.sma50 ?? '-'}</div>
+    <div class="stat-item">α Pareto: ${d.alpha_pareto}</div>
+    <div class="stat-item">Bayes ≥2.5: ${(d.prob_25_bayes*100).toFixed(1)}%</div>
+    <div class="stat-item">Bayes ≥5: ${(d.prob_5_bayes*100).toFixed(1)}%</div>
+    <div class="stat-item">Markov ≥2.5: ${(d.markov_25*100).toFixed(1)}%</div>
+    <div class="stat-item">Poisson ≥2.5: ${(d.poisson_25_5*100).toFixed(1)}%</div>
+    <div class="stat-item">LogReg ≥2.5: ${(d.logistic_25*100).toFixed(1)}%</div>
+    <div class="stat-item">LogReg ≥5: ${(d.logistic_5*100).toFixed(1)}%</div>
+    <div class="stat-item">LogReg ≥10: ${(d.logistic_10*100).toFixed(1)}%</div>
+  `;
+
+  // Prédictions d'heures
+  const predDiv = document.getElementById('predictionsContainer');
+  predDiv.innerHTML = `
+    <div class="pred-card">
+      <div class="mult">x2.50</div>
+      <div>${d.heure_entree_25 || '--'}</div>
+      <div class="small">confiance ${(d.logistic_25*100).toFixed(0)}%</div>
+    </div>
+    <div class="pred-card">
+      <div class="mult">x5.00</div>
+      <div>${d.heure_entree_5 || '--'}</div>
+      <div class="small">confiance ${(d.logistic_5*100).toFixed(0)}%</div>
+    </div>
+    <div class="pred-card">
+      <div class="mult">x10.00</div>
+      <div>${d.heure_entree_10 || '--'}</div>
+      <div class="small">confiance ${(d.logistic_10*100).toFixed(0)}%</div>
+    </div>
+  `;
+
+  // Heatmap
+  let canvas = document.getElementById('heatmapCanvas');
+  let ctx = canvas.getContext('2d');
+  let w = canvas.width = canvas.clientWidth;
+  let h = 100;
+  ctx.clearRect(0,0,w,h);
+  let bins = d.heatmap_bins;
+  let max = Math.max(...bins,1);
+  let colors = ['#2ecc71','#f1c40f','#e67e22','#e74c3c','#8e44ad'];
+  let bw = w / bins.length;
+  bins.forEach((cnt,i) => {
+    let barH = (cnt/max)*h;
+    ctx.fillStyle = colors[i];
+    ctx.fillRect(i*bw, h-barH, bw-2, barH);
+    ctx.fillStyle = 'white';
+    ctx.font = '9px monospace';
+    ctx.fillText(cnt, i*bw+3, h-barH+12);
+  });
+}
+</script>
+</body>
+</html>
