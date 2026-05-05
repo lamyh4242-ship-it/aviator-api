@@ -139,15 +139,19 @@ def estimate_turns(arr, target):
     return remaining
 
 def add_seconds_to_time(time_str, seconds):
-    """Ajoute des secondes à une heure HH:MM ou HH:MM:SS, retourne HH:MM"""
+    """Ajoute des secondes à une heure HH:MM ou HH:MM:SS.
+    Retourne le même format que l'entrée."""
     try:
-        # Essayer avec secondes
-        if len(time_str.split(':')) == 3:
+        has_seconds = len(time_str.split(':')) == 3
+        if has_seconds:
             t = datetime.strptime(time_str, "%H:%M:%S")
         else:
             t = datetime.strptime(time_str, "%H:%M")
         t += timedelta(seconds=seconds)
-        return t.strftime("%H:%M") # Affichage sans secondes pour rester lisible
+        if has_seconds:
+            return t.strftime("%H:%M:%S")
+        else:
+            return t.strftime("%H:%M")
     except:
         return "--:--"
 
@@ -194,14 +198,11 @@ def analyze(data: AnalysisRequest):
     heure_25 = heure_5 = heure_10 = None
     if data.last_tour_time:
         if tours_25 is not None:
-            delta_seconds = tours_25 * data.interval_seconds
-            heure_25 = add_seconds_to_time(data.last_tour_time, delta_seconds)
+            heure_25 = add_seconds_to_time(data.last_tour_time, tours_25 * data.interval_seconds)
         if tours_5 is not None:
-            delta_seconds = tours_5 * data.interval_seconds
-            heure_5 = add_seconds_to_time(data.last_tour_time, delta_seconds)
+            heure_5 = add_seconds_to_time(data.last_tour_time, tours_5 * data.interval_seconds)
         if tours_10 is not None:
-            delta_seconds = tours_10 * data.interval_seconds
-            heure_10 = add_seconds_to_time(data.last_tour_time, delta_seconds)
+            heure_10 = add_seconds_to_time(data.last_tour_time, tours_10 * data.interval_seconds)
 
     bins = heatmap_bins(arr)
 
