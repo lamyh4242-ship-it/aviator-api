@@ -10,7 +10,6 @@ import math
 
 app = FastAPI()
 
-# Autoriser les appels depuis n'importe quel domaine (pour test)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,14 +18,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Modèle de la requête
 class AnalysisRequest(BaseModel):
-    coefficients: List[float] # historique brut (ex: [2.16, 4.68, ...])
-    last_tour_time: Optional[str] = None # "HH:MM" (heure du dernier tour, local ou UTC)
-    interval_seconds: float = 30.0 # durée moyenne entre deux tours
-    future_turns_poisson: int = 5 # horizon pour la loi de Poisson
+    coefficients: List[float]
+    last_tour_time: Optional[str] = None # "HH:MM" ou "HH:MM:SS"
+    interval_seconds: float = 30.0
+    future_turns_poisson: int = 5
 
-# Modèle de la réponse
 class AnalysisResponse(BaseModel):
     total_tours: int
     volatilite: float
@@ -40,7 +37,7 @@ class AnalysisResponse(BaseModel):
     prob_10_bayes: float
     markov_25: float
     poisson_25_5: float
-    logistic_25: float # probabilité issue de la régression logistique
+    logistic_25: float
     logistic_5: float
     logistic_10: float
     tours_restants_25: Optional[int]
@@ -49,7 +46,7 @@ class AnalysisResponse(BaseModel):
     heure_entree_25: Optional[str]
     heure_entree_5: Optional[str]
     heure_entree_10: Optional[str]
-    heatmap_bins: List[int] # comptages pour 5 plages
+    heatmap_bins: List[int]
 
 # ---------- Fonctions statistiques ----------
 def basic_stats(arr):
@@ -63,7 +60,6 @@ def moving_average(arr, window):
 def pareto_alpha(arr, xm=1.0):
     if len(arr) == 0:
         return 0.0
-    # MLE pour alpha : n / sum(log(x_i / xm))
     log_sum = np.sum(np.log(np.array(arr) / xm))
     return len(arr) / log_sum if log_sum > 0 else 0.0
 
@@ -114,25 +110,18 @@ def poisson_prob(arr, threshold, future_turns=5):
     return 1 - math.exp(-lambda_)
 
 def logistic_prediction(arr, threshold):
-    """
-    Régression logistique simple : utilise les 5 derniers coefficients
-    pour prédire si le prochain tour dépassera 'threshold'.
-    Retourne la probabilité estimée.
-    """
     if len(arr) < 6:
         return 0.0
-    # Création d'un dataset : features = 5 derniers multiplicateurs, label = 1 si suivant >= threshold
     X, y = [], []
     for i in range(len(arr) - 5):
         X.append(arr[i:i+5])
         y.append(1 if arr[i+5] >= threshold else 0)
-    if len(set(y)) < 2: # besoin des deux classes
+    if len(set(y)) < 2:
         return float(np.mean(y)) if len(y) > 0 else 0.0
     model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     last_features = np.array(arr[-5:]).reshape(1, -1)
     proba = model.predict_proba(last_features)[0]
-    # proba[0] pour classe 0, proba[1] pour classe 1
     return proba[1] if len(proba) > 1 else proba[0]
 
 def estimate_turns(arr, target):
@@ -149,11 +138,16 @@ def estimate_turns(arr, target):
     remaining = max(1, int(round(avg - since_last)))
     return remaining
 
-def add_minutes_to_time(time_str, minutes):
+def add_seconds_to_time(time_str, seconds):
+    """Ajoute des secondes à une heure HH:MM ou HH:MM:SS, retourne HH:MM"""
     try:
-        t = datetime.strptime(time_str, "%H:%M")
-        t += timedelta(minutes=minutes)
-        return t.strftime("%H:%M")
+        # Essayer avec secondes
+        if len(time_str.split(':')) == 3:
+            t = datetime.strptime(time_str, "%H:%M:%S")
+        else:
+            t = datetime.strptime(time_str, "%H:%M")
+        t += timedelta(seconds=seconds)
+        return t.strftime("%H:%M") # Affichage sans secondes pour rester lisible
     except:
         return "--:--"
 
@@ -189,7 +183,6 @@ def analyze(data: AnalysisRequest):
     markov_val = markov_transition(arr)
     poisson_val = poisson_prob(arr, 2.5, data.future_turns_poisson)
 
-    # Régression logistique pour chaque seuil
     log_25 = logistic_prediction(arr, 2.5)
     log_5 = logistic_prediction(arr, 5.0)
     log_10 = logistic_prediction(arr, 10.0)
@@ -198,16 +191,17 @@ def analyze(data: AnalysisRequest):
     tours_5 = estimate_turns(arr, 5.0)
     tours_10 = estimate_turns(arr, 10.0)
 
-    # Calcul des heures d'entrée
-    heure_25, heure_5, heure_10 = None, None, None
+    heure_25 = heure_5 = heure_10 = None
     if data.last_tour_time:
-        interval_min = data.interval_seconds / 60
         if tours_25 is not None:
-            heure_25 = add_minutes_to_time(data.last_tour_time, tours_25 * interval_min)
+            delta_seconds = tours_25 * data.interval_seconds
+            heure_25 = add_seconds_to_time(data.last_tour_time, delta_seconds)
         if tours_5 is not None:
-            heure_5 = add_minutes_to_time(data.last_tour_time, tours_5 * interval_min)
+            delta_seconds = tours_5 * data.interval_seconds
+            heure_5 = add_seconds_to_time(data.last_tour_time, delta_seconds)
         if tours_10 is not None:
-            heure_10 = add_minutes_to_time(data.last_tour_time, tours_10 * interval_min)
+            delta_seconds = tours_10 * data.interval_seconds
+            heure_10 = add_seconds_to_time(data.last_tour_time, delta_seconds)
 
     bins = heatmap_bins(arr)
 
