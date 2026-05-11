@@ -7,12 +7,13 @@ import numpy as np
 import sqlite3
 import math
 import datetime
+import os
 
-# --- Base de données SQLite ---
-DATABASE = "virtual_matches.db"
+# --- Base de données SQLite dans /tmp (autorisé en écriture sur Render) ---
+DATABASE = "/tmp/virtual_matches.db"
 
 def init_db():
-    conn = sqlite3.connect(DATABASE, check_same_thread=False)
+    conn = sqlite3.connect(DATABASE)
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS matches (
