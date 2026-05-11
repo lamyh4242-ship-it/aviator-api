@@ -1,232 +1,164 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import numpy as np
-import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from datetime import datetime, timedelta
+import sqlite3
 import math
+import datetime
+
+# --- Base de données SQLite ---
+DATABASE = "virtual_matches.db"
+
+def init_db():
+    conn = sqlite3.connect(DATABASE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team TEXT NOT NULL,
+            opponent TEXT NOT NULL,
+            odds REAL,
+            score TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- Modèles ---
+class MatchInput(BaseModel):
+    team: str # "Bénin" ou "Guinée Équatoriale"
+    opponent: str
+    odds: float
+    score: Optional[str] = None
 
-class AnalysisRequest(BaseModel):
-    coefficients: List[float]
-    last_tour_time: Optional[str] = None # "HH:MM" ou "HH:MM:SS"
-    interval_seconds: float = 30.0
-    future_turns_poisson: int = 5
+class StatusResponse(BaseModel):
+    team: str
+    last_high_odds: Optional[float]
+    matches_since_last_high: int
+    mean_interval: float
+    current_Ic: float
+    zone: str
+    prob_2_goals: float
 
-class AnalysisResponse(BaseModel):
-    total_tours: int
-    volatilite: float
-    esperance: float
-    sma10: Optional[float]
-    sma25: Optional[float]
-    sma50: Optional[float]
-    alpha_pareto: float
-    prob_25_bayes: float
-    prob_5_bayes: float
-    prob_10_bayes: float
-    markov_25: float
-    poisson_25_5: float
-    logistic_25: float
-    logistic_5: float
-    logistic_10: float
-    tours_restants_25: Optional[int]
-    tours_restants_5: Optional[int]
-    tours_restants_10: Optional[int]
-    heure_entree_25: Optional[str]
-    heure_entree_5: Optional[str]
-    heure_entree_10: Optional[str]
-    heatmap_bins: List[int]
+# --- Fonctions statistiques ---
+def get_team_history(team: str) -> list:
+    conn = sqlite3.connect(DATABASE)
+    cur = conn.cursor()
+    cur.execute("SELECT odds, opponent, timestamp FROM matches WHERE team=? ORDER BY timestamp DESC LIMIT 500", (team,))
+    rows = cur.fetchall()
+    conn.close()
+    return [{"odds": row[0], "opponent": row[1], "timestamp": row[2]} for row in rows]
 
-# ---------- Fonctions statistiques ----------
-def basic_stats(arr):
-    return np.mean(arr), np.std(arr), np.var(arr)
+def compute_metrics(team: str) -> dict:
+    history = get_team_history(team)
+    if not history:
+        return {"matches_since": 0, "mean_interval": 350, "last_high_odds": None, "losses_streak": 0}
 
-def moving_average(arr, window):
-    if len(arr) < window:
-        return None
-    return np.mean(arr[-window:])
-
-def pareto_alpha(arr, xm=1.0):
-    if len(arr) == 0:
-        return 0.0
-    log_sum = np.sum(np.log(np.array(arr) / xm))
-    return len(arr) / log_sum if log_sum > 0 else 0.0
-
-def bayesian_prob(arr, threshold, prior=0.3):
-    hits = np.sum(np.array(arr) >= threshold)
-    n = len(arr)
-    if n == 0:
-        return prior
-    p_data = hits / n
-    posterior = (prior * p_data) / (prior * p_data + (1 - prior) * (1 - p_data))
-    return posterior
-
-def markov_transition(arr):
-    if len(arr) < 2:
-        return 0.0
-    states = [0 if x < 2.5 else (1 if x < 5 else 2) for x in arr]
-    trans = {
-        'from0to1': 0, 'from1to1': 0, 'from2to1': 0,
-        'cnt0': 0, 'cnt1': 0, 'cnt2': 0
-    }
-    for i in range(len(states) - 1):
-        f, t = states[i], states[i+1]
-        if f == 0:
-            trans['cnt0'] += 1
-            if t == 1:
-                trans['from0to1'] += 1
-        elif f == 1:
-            trans['cnt1'] += 1
-            if t == 1:
-                trans['from1to1'] += 1
-        else:
-            trans['cnt2'] += 1
-            if t == 1:
-                trans['from2to1'] += 1
-    last = states[-1]
-    if last == 0:
-        return (trans['from0to1'] / trans['cnt0']) if trans['cnt0'] > 0 else 0.2
-    elif last == 1:
-        return (trans['from1to1'] / trans['cnt1']) if trans['cnt1'] > 0 else 0.45
+    # Dernière cote ≥ 50
+    high_odds = [m for m in history if m["odds"] and m["odds"] >= 50]
+    if high_odds:
+        last_high = high_odds[0]
+        last_high_odds = last_high["odds"]
+        # Nombre de matchs depuis cette cote élevée
+        matches_since = next((i for i, m in enumerate(history) if m["odds"] and m["odds"] >= 50), len(history))
     else:
-        return (trans['from2to1'] / trans['cnt2']) if trans['cnt2'] > 0 else 0.1
+        last_high_odds = None
+        matches_since = len(history)
 
-def poisson_prob(arr, threshold, future_turns=5):
-    if len(arr) == 0:
-        return 0.0
-    hits = np.sum(np.array(arr) >= threshold)
-    lambda_ = (hits / len(arr)) * future_turns
-    return 1 - math.exp(-lambda_)
+    # Intervalle moyen entre cotes ≥ 50
+    high_indices = [i for i, m in enumerate(history) if m["odds"] and m["odds"] >= 50]
+    if len(high_indices) >= 2:
+        intervals = [high_indices[i] - high_indices[i+1] for i in range(len(high_indices)-1)]
+        mean_interval = np.mean(intervals)
+    else:
+        mean_interval = 350 # défaut basé sur observation approximative
 
-def logistic_prediction(arr, threshold):
-    if len(arr) < 6:
-        return 0.0
-    X, y = [], []
-    for i in range(len(arr) - 5):
-        X.append(arr[i:i+5])
-        y.append(1 if arr[i+5] >= threshold else 0)
-    if len(set(y)) < 2:
-        return float(np.mean(y)) if len(y) > 0 else 0.0
-    model = LogisticRegression(max_iter=1000)
-    model.fit(X, y)
-    last_features = np.array(arr[-5:]).reshape(1, -1)
-    proba = model.predict_proba(last_features)[0]
-    return proba[1] if len(proba) > 1 else proba[0]
+    losses_streak = matches_since # approximation
 
-def estimate_turns(arr, target):
-    intervals, last = [], -1
-    for i, v in enumerate(arr):
-        if v >= target:
-            if last != -1:
-                intervals.append(i - last)
-            last = i
-    if not intervals:
-        return None
-    avg = np.mean(intervals)
-    since_last = len(arr) - 1 - last
-    remaining = max(1, int(round(avg - since_last)))
-    return remaining
+    return {
+        "matches_since": matches_since,
+        "mean_interval": mean_interval,
+        "last_high_odds": last_high_odds,
+        "losses_streak": losses_streak
+    }
 
-def add_seconds_to_time(time_str, seconds):
-    """Ajoute des secondes à une heure HH:MM ou HH:MM:SS.
-    Retourne le même format que l'entrée."""
-    try:
-        has_seconds = len(time_str.split(':')) == 3
-        if has_seconds:
-            t = datetime.strptime(time_str, "%H:%M:%S")
-        else:
-            t = datetime.strptime(time_str, "%H:%M")
-        t += timedelta(seconds=seconds)
-        if has_seconds:
-            return t.strftime("%H:%M:%S")
-        else:
-            return t.strftime("%H:%M")
-    except:
-        return "--:--"
+def poisson_prob(lam, k):
+    return (lam**k * math.exp(-lam)) / math.factorial(k)
 
-def heatmap_bins(arr):
-    bins = [0]*5
-    for v in arr:
-        if v < 2: bins[0] += 1
-        elif v < 4: bins[1] += 1
-        elif v < 8: bins[2] += 1
-        elif v < 15: bins[3] += 1
-        else: bins[4] += 1
-    return bins
+# --- Endpoints ---
+@app.post("/submit-match")
+def submit_match(match: MatchInput):
+    conn = sqlite3.connect(DATABASE)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO matches (team, opponent, odds, score) VALUES (?,?,?,?)",
+                (match.team, match.opponent, match.odds, match.score))
+    conn.commit()
+    conn.close()
 
-# ---------- Endpoint principal ----------
-@app.post("/analyze", response_model=AnalysisResponse)
-def analyze(data: AnalysisRequest):
-    coeffs = data.coefficients
-    if len(coeffs) < 3:
-        raise HTTPException(status_code=400, detail="Au moins 3 coefficients requis")
+    metrics = compute_metrics(match.team)
+    E_act = metrics["matches_since"]
+    E_moy = metrics["mean_interval"]
+    N_pertes = metrics["losses_streak"]
+    Ic = (E_act / E_moy) * math.log(N_pertes + 1) if E_moy > 0 else 0.0
+    alert = Ic >= 1.8
+    return {"message": "Match enregistré", "Ic": round(Ic, 3), "alert": alert}
 
-    arr = np.array(coeffs)
-    mean_val, std_val, var_val = basic_stats(arr)
+@app.get("/status/{team}", response_model=StatusResponse)
+def get_status(team: str):
+    if team not in ["Bénin", "Guinée Équatoriale"]:
+        raise HTTPException(status_code=400, detail="Équipe non supportée")
+    metrics = compute_metrics(team)
+    E_act = metrics["matches_since"]
+    E_moy = metrics["mean_interval"]
+    N_pertes = metrics["losses_streak"]
+    Ic = (E_act / E_moy) * math.log(N_pertes + 1) if E_moy > 0 else 0.0
 
-    sma10 = moving_average(arr, 10)
-    sma25 = moving_average(arr, 25)
-    sma50 = moving_average(arr, 50)
+    if Ic < 1.0:
+        zone = "froide"
+    elif Ic < 1.8:
+        zone = "observation"
+    else:
+        zone = "chasse"
 
-    alpha = pareto_alpha(arr)
-    prob25 = bayesian_prob(arr, 2.5)
-    prob5 = bayesian_prob(arr, 5.0)
-    prob10 = bayesian_prob(arr, 10.0)
+    lam = 0.8 # moyenne de buts (à ajuster)
+    prob_2 = poisson_prob(lam, 2)
 
-    markov_val = markov_transition(arr)
-    poisson_val = poisson_prob(arr, 2.5, data.future_turns_poisson)
-
-    log_25 = logistic_prediction(arr, 2.5)
-    log_5 = logistic_prediction(arr, 5.0)
-    log_10 = logistic_prediction(arr, 10.0)
-
-    tours_25 = estimate_turns(arr, 2.5)
-    tours_5 = estimate_turns(arr, 5.0)
-    tours_10 = estimate_turns(arr, 10.0)
-
-    heure_25 = heure_5 = heure_10 = None
-    if data.last_tour_time:
-        if tours_25 is not None:
-            heure_25 = add_seconds_to_time(data.last_tour_time, tours_25 * data.interval_seconds)
-        if tours_5 is not None:
-            heure_5 = add_seconds_to_time(data.last_tour_time, tours_5 * data.interval_seconds)
-        if tours_10 is not None:
-            heure_10 = add_seconds_to_time(data.last_tour_time, tours_10 * data.interval_seconds)
-
-    bins = heatmap_bins(arr)
-
-    return AnalysisResponse(
-        total_tours=len(coeffs),
-        volatilite=round(std_val, 2),
-        esperance=round(mean_val, 2),
-        sma10=round(sma10, 2) if sma10 is not None else None,
-        sma25=round(sma25, 2) if sma25 is not None else None,
-        sma50=round(sma50, 2) if sma50 is not None else None,
-        alpha_pareto=round(alpha, 2),
-        prob_25_bayes=round(prob25, 4),
-        prob_5_bayes=round(prob5, 4),
-        prob_10_bayes=round(prob10, 4),
-        markov_25=round(markov_val, 4),
-        poisson_25_5=round(poisson_val, 4),
-        logistic_25=round(log_25, 4),
-        logistic_5=round(log_5, 4),
-        logistic_10=round(log_10, 4),
-        tours_restants_25=tours_25,
-        tours_restants_5=tours_5,
-        tours_restants_10=tours_10,
-        heure_entree_25=heure_25,
-        heure_entree_5=heure_5,
-        heure_entree_10=heure_10,
-        heatmap_bins=bins
+    return StatusResponse(
+        team=team,
+        last_high_odds=metrics["last_high_odds"],
+        matches_since_last_high=E_act,
+        mean_interval=round(E_moy, 1),
+        current_Ic=round(Ic, 3),
+        zone=zone,
+        prob_2_goals=round(prob_2, 4)
     )
+
+@app.get("/dashboard")
+def dashboard():
+    benin = get_status("Bénin")
+    guinee = get_status("Guinée Équatoriale")
+    return {"Bénin": benin, "Guinée Équatoriale": guinee}
+
+# Service Worker pour notifications
+@app.get("/sw.js", response_class=PlainTextResponse)
+def service_worker():
+    return """
+self.addEventListener('push', function(event) {
+  const data = event.data.json();
+  const options = {
+    body: data.body,
+    icon: 'data:image/svg+xml,%3Csvg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"%23f5b042\"%3E%3Cpath d=\"M12 2L2 22h8v-6h4v6h8L12 2z\"/%3E%3C/svg%3E'
+  };
+  event.waitUntil(
+    self.registration.showNotification(data.title, options)
+  );
+});
+"""
