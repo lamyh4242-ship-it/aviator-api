@@ -1,27 +1,20 @@
-# main.py – Backend FastAPI avec scraper intégré (simulé) + calculs statistiques
-# Déploiement : Render, gratuit. Base SQLite dans /tmp.
-
 import asyncio
 import math
 import os
 import sqlite3
 import time
 from datetime import datetime
-from typing import Optional, List
-
+from typing import Optional
 import httpx
 import numpy as np
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
 
 # ==================== CONFIGURATION ====================
 DATABASE = "/tmp/virtual_matches.db"
-BET261_URL = "https://bet261.mg" # À adapter avec l'URL réelle des données JSON
-SCRAPE_INTERVAL = 30 # secondes entre chaque tentative de récupération automatique
+# Le lien magique que tu as trouvé
+DATA_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues/round/5?eventCategoryId=146214&getNext=false"
 
-# ==================== BASE DE DONNÉES ====================
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
@@ -32,7 +25,9 @@ def init_db():
             opponent TEXT NOT NULL,
             odds REAL,
             score TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            expected_start TEXT,
+            UNIQUE(team, expected_start)
         )
     """)
     conn.commit()
@@ -40,192 +35,101 @@ def init_db():
 
 init_db()
 
-# ==================== MODÈLES ====================
-class MatchInput(BaseModel):
-    team: str # "Bénin" ou "Guinée Équatoriale"
-    opponent: str
-    odds: float
-    score: Optional[str] = None
+# ==================== LOGIQUE DE CAPTURE (AUTOMATIQUE) ====================
+async def fetch_and_process():
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(DATA_URL, timeout=10)
+            data = response.json()
+            
+            round_info = data.get("round", {})
+            start_time = round_info.get("expectedStart")
+            events = round_info.get("events", [])
+            
+            conn = sqlite3.connect(DATABASE)
+            c = conn.cursor()
+            
+            for event in events:
+                home = event.get("homeTeamName")
+                away = event.get("awayTeamName")
+                # On cherche les cotes dans les marchés (markets)
+                markets = event.get("markets", [])
+                odds_val = 1.0
+                # On cherche la cote du score exact ou de la victoire surprise
+                for m in markets:
+                    if m.get("marketName") == "Correct Score" or m.get("marketName") == "1X2":
+                        # Logique pour extraire la cote la plus haute pour l'outsider
+                        outcomes = m.get("outcomes", [])
+                        if outcomes:
+                            odds_val = max([float(o.get("odds", 1)) for o in outcomes])
 
-class StatusResponse(BaseModel):
-    team: str
-    last_high_odds: Optional[float]
-    matches_since_last_high: int
-    mean_interval: float
-    current_Ic: float
-    zone: str
-    prob_2_goals: float
-    next_adversary: Optional[str]
-    next_odds: Optional[float]
+                for target in ["Bénin", "Guinée Équatoriale"]:
+                    if home == target or away == target:
+                        opponent = away if home == target else home
+                        try:
+                            c.execute("INSERT OR IGNORE INTO matches (team, opponent, odds, expected_start) VALUES (?,?,?,?)",
+                                      (target, opponent, odds_val, start_time))
+                        except:
+                            pass
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Erreur de capture : {e}")
 
-# ==================== FONCTIONS STATISTIQUES ====================
-def get_team_history(team: str) -> list:
+async def scraper_task():
+    while True:
+        await fetch_and_process()
+        await asyncio.sleep(30) # Vérification toutes les 30 sec
+
+# ==================== ANALYSE ET PRÉDICTION ====================
+def compute_ic(team: str):
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT odds, opponent, timestamp FROM matches WHERE team=? ORDER BY timestamp DESC LIMIT 500", (team,))
+    c.execute("SELECT odds FROM matches WHERE team=? ORDER BY id DESC", (team,))
     rows = c.fetchall()
     conn.close()
-    return [{"odds": row[0], "opponent": row[1], "timestamp": row[2]} for row in rows]
-
-def compute_metrics(team: str) -> dict:
-    history = get_team_history(team)
-    if not history:
-        return {
-            "matches_since": 0,
-            "mean_interval": 350,
-            "last_high_odds": None,
-            "losses_streak": 0,
-            "next_opponent": None,
-            "next_odds": None
-        }
-    # Prochain match = le plus récent (dernier inséré)
-    last_match = history[0]
-    next_opponent = last_match["opponent"]
-    next_odds = last_match["odds"]
-
-    # Cotes ≥ 50
-    high = [m for m in history if m["odds"] and m["odds"] >= 50]
-    if high:
-        last_high_odds = high[0]["odds"]
-        matches_since = next((i for i, m in enumerate(history) if m["odds"] and m["odds"] >= 50), len(history))
-    else:
-        last_high_odds = None
+    
+    if not rows: return 0.0, 350, 0
+    
+    # On cherche les cotes >= 25 (ton nouveau palier)
+    history = [r[0] for r in rows]
+    try:
+        matches_since = next(i for i, o in enumerate(history) if o >= 25)
+    except StopIteration:
         matches_since = len(history)
+        
+    mean_interval = 350 # Valeur par défaut
+    ic = (matches_since / mean_interval) * math.log(matches_since + 1) if matches_since > 0 else 0
+    return round(ic, 3), matches_since, history[0]
 
-    high_indices = [i for i, m in enumerate(history) if m["odds"] and m["odds"] >= 50]
-    if len(high_indices) >= 2:
-        intervals = [high_indices[i] - high_indices[i+1] for i in range(len(high_indices)-1)]
-        mean_interval = np.mean(intervals)
-    else:
-        mean_interval = 350
-
-    return {
-        "matches_since": matches_since,
-        "mean_interval": mean_interval,
-        "last_high_odds": last_high_odds,
-        "losses_streak": matches_since,
-        "next_opponent": next_opponent,
-        "next_odds": next_odds
-    }
-
-def poisson_prob(lam, k):
-    return (lam**k * math.exp(-lam)) / math.factorial(k)
-
-# ==================== SCRAPER (SIMULÉ POUR DÉMO) ====================
-async def scrape_bet261():
-    """
-    Exemple de scraper. En conditions réelles, il faudrait :
-    - Identifier l'endpoint JSON des matchs virtuels (via les outils dev du navigateur)
-    - Utiliser des headers réalistes
-    - Gérer les rotations de proxy si nécessaire
-    Pour la démo, on simule une récupération.
-    """
-    # Liste de matchs simulés (en vrai, on ferait un appel HTTP)
-    simulated_matches = [
-        {"team": "Bénin", "opponent": "Nigeria", "odds": 100, "score": None},
-        {"team": "Guinée Équatoriale", "opponent": "Cameroun", "odds": 50, "score": None},
-        # Ajoutez ici de vrais appels API
-    ]
-    # Exemple d'appel avec httpx (si vous avez l'URL exacte)
-    # async with httpx.AsyncClient() as client:
-    # resp = await client.get(f"{BET261_URL}/api/virtual-matches?league=CAN")
-    # data = resp.json()
-    # for match in data:
-    # # parser et insérer
-    # pass
-    # Pour l'instant, on insère les simulés
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    for m in simulated_matches:
-        c.execute("INSERT INTO matches (team, opponent, odds, score) VALUES (?,?,?,?)",
-                  (m["team"], m["opponent"], m["odds"], m["score"]))
-    conn.commit()
-    conn.close()
-
-# ==================== TÂCHE DE FOND (BACKGROUND) ====================
-async def periodic_scraper():
-    while True:
-        try:
-            await scrape_bet261()
-        except Exception as e:
-            print(f"Scraper error: {e}")
-        await asyncio.sleep(SCRAPE_INTERVAL)
-
-# ==================== FASTAPI ====================
+# ==================== API FASTAPI ====================
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"])
 
 @app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(periodic_scraper())
-
-@app.post("/submit-match")
-def submit_match(match: MatchInput):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("INSERT INTO matches (team, opponent, odds, score) VALUES (?,?,?,?)",
-              (match.team, match.opponent, match.odds, match.score))
-    conn.commit()
-    conn.close()
-    # Recalculer les métriques pour renvoyer l'Ic
-    metrics = compute_metrics(match.team)
-    E_act = metrics["matches_since"]
-    E_moy = metrics["mean_interval"]
-    N_pertes = metrics["losses_streak"]
-    Ic = (E_act / E_moy) * math.log(N_pertes + 1) if E_moy > 0 else 0.0
-    return {"message": "Match enregistré", "Ic": round(Ic, 3), "alert": Ic >= 1.8}
-
-@app.get("/status/{team}", response_model=StatusResponse)
-def get_status(team: str):
-    if team not in ["Bénin", "Guinée Équatoriale"]:
-        raise HTTPException(status_code=400, detail="Équipe non supportée")
-    metrics = compute_metrics(team)
-    E_act = metrics["matches_since"]
-    E_moy = metrics["mean_interval"]
-    N_pertes = metrics["losses_streak"]
-    Ic = (E_act / E_moy) * math.log(N_pertes + 1) if E_moy > 0 else 0.0
-
-    if Ic < 1.0:
-        zone = "froide"
-    elif Ic < 1.8:
-        zone = "observation"
-    else:
-        zone = "chasse"
-
-    lam = 0.8 # moyenne buts Bénin/Guinée Éq.
-    prob_2 = poisson_prob(lam, 2)
-
-    return StatusResponse(
-        team=team,
-        last_high_odds=metrics["last_high_odds"],
-        matches_since_last_high=E_act,
-        mean_interval=round(E_moy, 1),
-        current_Ic=round(Ic, 3),
-        zone=zone,
-        prob_2_goals=round(prob_2, 4),
-        next_adversary=metrics["next_opponent"],
-        next_odds=metrics["next_odds"]
-    )
+async def startup():
+    asyncio.create_task(scraper_task())
 
 @app.get("/dashboard")
-def dashboard():
-    return {
-        "Bénin": get_status("Bénin"),
-        "Guinée Équatoriale": get_status("Guinée Équatoriale")
-    }
-
-# Service Worker pour notifications
-@app.get("/sw.js", response_class=PlainTextResponse)
-def service_worker():
-    return """
-self.addEventListener('push', function(event) {
-  const data = event.data.json();
-  const options = {
-    body: data.body,
-    icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23f5b042"%3E%3Cpath d="M12 2L2 22h8v-6h4v6h8L12 2z"/%3E%3C/svg%3E'
-  };
-  event.waitUntil(
-    self.registration.showNotification(data.title, options)
-  );
-});
-"""
+def get_dashboard():
+    results = {}
+    for team in ["Bénin", "Guinée Équatoriale"]:
+        ic, ecart, last_odds = compute_ic(team)
+        
+        # Prédiction de l'heure
+        matchs_restants = max(0, 350 - ecart)
+        minutes_restantes = matchs_restants * 3
+        heure_chasse = datetime.fromtimestamp(time.time() + minutes_restantes*60).strftime("%H:%M")
+        
+        # Prédiction Score Exact
+        scores = ["1-2", "2-1"] if ic > 1.5 else ["1-0", "0-1"]
+        
+        results[team] = {
+            "current_Ic": ic,
+            "ecart": ecart,
+            "zone": "CHASSE" if ic >= 1.8 else "OBSERVATION" if ic >= 1.2 else "FROIDE",
+            "heure_estimee": heure_chasse,
+            "scores_conseilles": scores,
+            "last_odds": last_odds
+        }
+    return results
