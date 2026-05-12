@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 DATABASE = "/tmp/virtual_matches.db"
-# NOUVELLE URL : On utilise l'API de base qui est plus ouverte
+# URL simplifiée
 DATA_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues/round/8060"
 
 def init_db():
@@ -20,95 +20,69 @@ def init_db():
 
 init_db()
 
-async def fetch_and_process():
-    # On imite un navigateur Chrome sur Windows (très classique)
+async def run_scan():
+    print(f"--- 🛰️ DÉMARRAGE DU SCAN : {datetime.now()} ---")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://bet261.mg/",
-        "Origin": "https://bet261.mg"
+        "Referer": "https://bet261.mg/"
     }
-    
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         try:
-            # On ajoute un paramètre aléatoire pour éviter que Bet261 nous serve une vieille page (Cache)
-            params = {"t": int(time.time())}
-            response = await client.get(DATA_URL, params=params, timeout=15)
-            
-            print(f"--- DEBUG : Code {response.status_code} ---")
-            
+            response = await client.get(DATA_URL, timeout=10)
+            print(f"--- 📡 STATUS CODE : {response.status_code} ---")
             if response.status_code == 200:
                 data = response.json()
-                # La structure du JSON peut varier, on cherche partout
-                events = data.get("round", {}).get("events", [])
-                if not events: # Si ce n'est pas dans 'round', on cherche à la racine
-                    events = data.get("events", [])
-
-                print(f"Matchs trouvés : {len(events)}")
-
+                events = data.get("round", {}).get("events", []) or data.get("events", [])
+                print(f"--- ⚽ MATCHS TROUVÉS : {len(events)} ---")
+                
                 conn = sqlite3.connect(DATABASE)
                 c = conn.cursor()
-                
                 for event in events:
-                    home = str(event.get("homeTeamName", ""))
-                    away = str(event.get("awayTeamName", ""))
-                    
-                    # On cherche Bénin ou Guinée
+                    h = str(event.get("homeTeamName", "")).lower()
+                    a = str(event.get("awayTeamName", "")).lower()
                     target = None
-                    if "benin" in home.lower() or "benin" in away.lower():
-                        target = "Bénin"
-                    elif "equa" in home.lower() or "equa" in away.lower() or "guine" in home.lower():
-                        target = "Guinée Équatoriale"
-
+                    if "benin" in h or "benin" in a: target = "Bénin"
+                    elif "equa" in h or "equa" in a: target = "Guinée Équatoriale"
+                    
                     if target:
-                        opp = away if target.lower() in home.lower() else home
-                        # Extraction cotes
-                        odds = 1.0
-                        for m in event.get("markets", []):
-                            for o in m.get("outcomes", []):
-                                try: odds = max(odds, float(o.get("odds", 1)))
-                                except: continue
-                        
+                        opp = event.get("awayTeamName") if target.lower() in h else event.get("homeTeamName")
                         c.execute("INSERT OR IGNORE INTO matches (team, opponent, odds, expected_start) VALUES (?,?,?,?)",
-                                 (target, opp, odds, str(time.time())))
-                        print(f"✅ Enregistré : {target} vs {opp} (Cote: {odds})")
-                
+                                 (target, opp, 2.0, str(time.time())))
+                        print(f"✅ MATCH OK : {target} vs {opp}")
                 conn.commit()
                 conn.close()
-            else:
-                print(f"⚠️ Erreur serveur : {response.text[:100]}")
-                
         except Exception as e:
-            print(f"❌ Erreur Scan : {e}")
-
-async def scraper_loop():
-    while True:
-        await fetch_and_process()
-        await asyncio.sleep(25)
+            print(f"❌ ERREUR : {e}")
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"])
 
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(scraper_loop())
-
+# Cette route "réveille" le robot à chaque fois que tu l'appelles
 @app.get("/dashboard")
-def get_dashboard():
+async def get_dashboard():
+    # On lance un scan rapide en arrière-plan à chaque appel
+    asyncio.create_task(run_scan())
+    
     results = {}
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     for team in ["Bénin", "Guinée Équatoriale"]:
-        c.execute("SELECT odds, opponent FROM matches WHERE team=? ORDER BY id DESC LIMIT 50", (team,))
-        rows = c.fetchall()
-        if not rows:
-            results[team] = {"current_Ic": 0, "ecart": "0 matchs", "opponent": "Scan en cours...", "last_odds": 0, "zone": "FROIDE"}
+        c.execute("SELECT odds, opponent FROM matches WHERE team=? ORDER BY id DESC LIMIT 1", (team,))
+        row = c.fetchone()
+        if not row:
+            results[team] = {"current_Ic": 0.0, "ecart": "0 matchs", "opponent": "Scan en cours...", "last_odds": 0, "zone": "FROIDE"}
         else:
+            c.execute("SELECT odds FROM matches WHERE team=? ORDER BY id DESC", (team,))
+            all_odds = [r[0] for r in c.fetchall()]
             ecart = 0
-            for r in rows:
-                if r[0] >= 25: break
+            for o in all_odds:
+                if o >= 25: break
                 ecart += 1
             ic = round((ecart / 30) * math.log(ecart + 2), 2)
-            results[team] = {"current_Ic": ic, "ecart": f"{ecart} matchs", "opponent": rows[0][1], "last_odds": rows[0][0], "zone": "CHASSE" if ic >= 1.5 else "FROIDE"}
+            results[team] = {"current_Ic": ic, "ecart": f"{ecart} matchs", "opponent": row[1], "last_odds": row[0], "zone": "OUI" if ic >= 1.5 else "NON"}
     conn.close()
     return results
+
+@app.get("/")
+def home():
+    return {"status": "Robot en ligne. Allez sur /dashboard"}
