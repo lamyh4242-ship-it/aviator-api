@@ -3,5 +3,3 @@ uvicorn
 numpy
 scikit-learn
 httpx
-playwright
-pytest-playwright
