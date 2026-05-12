@@ -3,5 +3,5 @@ uvicorn
 numpy
 scikit-learn
 httpx
-playwright==1.42.0
+playwright
 pytest-playwright
