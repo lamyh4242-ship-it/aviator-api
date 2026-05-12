@@ -45,62 +45,65 @@ async def fetch_and_process():
                 home = event.get("homeTeamName", "")
                 away = event.get("awayTeamName", "")
                 
-                # Récupération de la cote max du match (outsider)
-                max_odds = 1.0
+                # On récupère la cote la plus haute du match (l'outsider)
+                all_odds = []
                 for m in event.get("markets", []):
                     for o in m.get("outcomes", []):
-                        val = float(o.get("odds", 1))
-                        if val > max_odds: max_odds = val
+                        try: all_odds.append(float(o.get("odds", 1)))
+                        except: continue
+                max_odds = max(all_odds) if all_odds else 1.0
 
-                # DETECTION EXACTE SELON TES INFOS
-                # On check 'Benin' et 'Equatorial Guinea'
-                is_benin = "Benin" in [home, away]
-                is_guinea = "Equatorial Guinea" in [home, away]
+                # DÉTECTION ULTRA-LARGE (Insensible à la casse et aux accents)
+                h_low, a_low = home.lower(), away.lower()
+                
+                is_benin = "benin" in h_low or "benin" in a_low
+                is_guinea = "equa" in h_low or "equa" in a_low
 
-                if is_benin or is_guinea:
-                    target = "Bénin" if is_benin else "Guinée Équatoriale"
-                    # L'adversaire est l'autre équipe
-                    if is_benin:
-                        opponent = away if home == "Benin" else home
-                    else:
-                        opponent = away if home == "Equatorial Guinea" else home
-                    
+                if is_benin:
+                    target, opp = "Bénin", (away if "benin" in h_low else home)
                     c.execute("INSERT OR IGNORE INTO matches (team, opponent, odds, expected_start) VALUES (?,?,?,?)",
-                              (target, opponent, max_odds, start_time))
+                              (target, opp, max_odds, start_time))
+                
+                if is_guinea:
+                    target, opp = "Guinée Équatoriale", (away if "equa" in h_low else home)
+                    c.execute("INSERT OR IGNORE INTO matches (team, opponent, odds, expected_start) VALUES (?,?,?,?)",
+                              (target, opp, max_odds, start_time))
             
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"Erreur : {e}")
+            print(f"Erreur technique : {e}")
 
 async def scraper_task():
     while True:
         await fetch_and_process()
-        await asyncio.sleep(20)
+        await asyncio.sleep(15) # Scan très fréquent pour ne rien rater
 
 def compute_stats(team: str):
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT odds, opponent FROM matches WHERE team=? ORDER BY expected_start DESC", (team,))
+    c.execute("SELECT odds, opponent FROM matches WHERE team=? ORDER BY expected_start DESC LIMIT 500", (team,))
     rows = c.fetchall()
     conn.close()
     
     if not rows:
         return {"ic": 0, "ecart": 0, "last_odds": 0.0, "opponent": "Scan en cours..."}
     
-    last_odds = rows[0][0]
-    last_opponent = rows[0][1]
-    
-    # Calcul de l'écart réel (matchs sans cote >= 25)
+    # Écart : nombre de matchs depuis la dernière cote >= 25
     ecart = 0
     for r in rows:
         if r[0] >= 25: break
         ecart += 1
     
-    # Indice IC ultra-sensible pour le démarrage
+    # Indice IC : on divise par 50 pour que ça monte visiblement vite
     ic = (ecart / 50) * math.log(ecart + 2)
     
-    return {"ic": round(ic, 2), "ecart": ecart, "last_odds": last_odds, "opponent": last_opponent}
+    return {
+        "ic": round(ic, 2),
+        "ecart": ecart, 
+        "last_odds": rows[0][0], 
+        "opponent": rows[0][1]
+    }
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"])
@@ -114,10 +117,15 @@ def get_dashboard():
     results = {}
     for team in ["Bénin", "Guinée Équatoriale"]:
         s = compute_stats(team)
-        # 3 min par match restant pour l'écart de 350
-        min_r = max(0, 350 - s["ecart"]) * 3
-        heure_c = datetime.fromtimestamp(time.time() + min_r*60).strftime("%H:%M")
+        # Estimation : match toutes les 2 min
+        minutes_restantes = max(0, 350 - s["ecart"]) * 2
+        heure_c = datetime.fromtimestamp(time.time() + minutes_restantes*60).strftime("%H:%M")
         
+        # Changement dynamique des scores selon l'indice
+        if s["ic"] < 0.5: sc = ["1-0", "0-1"]
+        elif s["ic"] < 1.5: sc = ["2-1", "1-2"]
+        else: sc = ["2-2", "3-1"]
+
         results[team] = {
             "current_Ic": s["ic"],
             "ecart": s["ecart"],
@@ -125,6 +133,6 @@ def get_dashboard():
             "last_odds": s["last_odds"],
             "heure_estimee": heure_c,
             "zone": "CHASSE" if s["ic"] >= 1.8 else "OBSERVATION" if s["ic"] >= 1.2 else "FROIDE",
-            "scores_conseilles": ["2-1", "1-2"] if s["ic"] >= 1.5 else ["1-0", "0-1"]
+            "scores_conseilles": sc
         }
     return results
