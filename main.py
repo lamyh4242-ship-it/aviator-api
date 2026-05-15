@@ -1,95 +1,62 @@
-import asyncio, math, sqlite3, time, httpx, random
+import asyncio, math, sqlite3, time, httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-DATABASE = "/tmp/virtual_matches.db"
+DATABASE = "/tmp/can_full_scan.db"
 BASE_API_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
 
 def init_db():
     conn = sqlite3.connect(DATABASE); c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS matches (id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT, opponent TEXT, odds REAL, timestamp TEXT, UNIQUE(team, timestamp))")
+    # On stocke par équipe pour suivre l'historique de chacune
+    c.execute("CREATE TABLE IF NOT EXISTS history (team TEXT PRIMARY KEY, ecart INTEGER, last_opp TEXT)")
     conn.commit(); conn.close()
 
 init_db()
 
-async def perform_universal_scan():
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://bet261.mg/"}
-    found_count = 0
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+async def scan_all_can_matches():
+    async with httpx.AsyncClient() as client:
         try:
-            r_leagues = await client.get(BASE_API_URL, timeout=10)
-            if r_leagues.status_code != 200: return 0
+            r_leagues = await client.get(BASE_API_URL)
             leagues = r_leagues.json()
-            for league in leagues:
-                l_id = league.get("id")
-                scan_url = f"{BASE_API_URL}/playout?eventCategoryId={l_id}"
-                try:
-                    r = await client.get(scan_url, timeout=5)
-                    if r.status_code == 200:
-                        matches_data = r.json().get("matches", [])
-                        conn = sqlite3.connect(DATABASE); c = conn.cursor()
-                        for m in matches_data:
-                            h_raw = str(m.get("homeTeamName") or m.get("homeName") or "")
-                            a_raw = str(m.get("awayTeamName") or m.get("awayName") or "")
-                            h, a = h_raw.lower(), a_raw.lower()
-                            target = None
-                            if "benin" in h or "benin" in a: target = "Bénin"
-                            elif any(x in h or x in a for x in ["equa", "guinea"]): target = "Guinée Équatoriale"
-                            
-                            if target:
-                                match_odds = 2.0
-                                for market in m.get("markets", []):
-                                    if "1x2" in market.get("name", "").lower():
-                                        match_odds = max([float(o.get("odds", 2.0)) for o in market.get("outcomes", [])])
-                                is_home = any(x in h for x in ["benin", "equa", "guinea"])
-                                opponent = a_raw if is_home else h_raw
-                                c.execute("INSERT OR IGNORE INTO matches (team, opponent, odds, timestamp) VALUES (?, ?, ?, ?)", 
-                                         (target, str(opponent), match_odds, str(time.time())))
-                                found_count += 1
-                        conn.commit(); conn.close()
-                except: continue
-        except: pass
-    return found_count
+            can_id = next((l['id'] for l in leagues if "Africa" in l['name']), leagues[0]['id'])
+            
+            r_matches = await client.get(f"{BASE_API_URL}/playout?eventCategoryId={can_id}")
+            matches = r_matches.json().get("matches", [])
+            
+            predictions = []
+            conn = sqlite3.connect(DATABASE); c = conn.cursor()
+            
+            for m in matches:
+                h = m.get("homeTeamName")
+                a = m.get("awayTeamName")
+                
+                # Mise à jour de l'écart pour ces équipes (logique de cycle)
+                c.execute("INSERT OR IGNORE INTO history (team, ecart) VALUES (?, 0)", (h,))
+                c.execute("UPDATE history SET ecart = ecart + 1, last_opp = ? WHERE team = ?", (a, h))
+                
+                c.execute("SELECT ecart FROM history WHERE team = ?", (h,))
+                current_ecart = c.fetchone()[0]
+                
+                # Calcul de l'indice de confiance pour ce match précis
+                ic = round((current_ecart / 10) * 1.8, 2)
+                
+                predictions.append({
+                    "home": h,
+                    "away": a,
+                    "ic": ic,
+                    "confidence": min(int(ic * 50), 96),
+                    "scores": ["1-1", "2-1", "1-0"] if ic > 1.2 else ["0-0", "1-0"]
+                })
+            
+            conn.commit(); conn.close()
+            return predictions
+        except: return []
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"])
 
 @app.get("/dashboard")
-async def get_dashboard():
-    total = await perform_universal_scan()
-    print(f"--- SCAN TERMINE : {total} MATCHS TROUVES ---")
-    conn = sqlite3.connect(DATABASE); c = conn.cursor()
-    res = {}
-    
-    for t in ["Bénin", "Guinée Équatoriale"]:
-        c.execute("SELECT odds, opponent FROM matches WHERE team=? ORDER BY id DESC LIMIT 1", (t,))
-        row = c.fetchone()
-        
-        last_odds = row[0] if row else 0.0
-        opponent = row[1] if row else "En attente"
-        
-        c.execute("SELECT odds FROM matches WHERE team=?", (t,))
-        history = c.fetchall()
-        ecart = len(history)
-        ic = round((ecart / 30) * math.log(ecart + 2), 2) if ecart > 0 else 0.0
-        
-        # Logique des Zones pour ton CSS
-        zone = "FROIDE"
-        if ic >= 1.5: zone = "CHASSE"
-        elif ic >= 0.8: zone = "OBSERVATION"
-
-        # LES CLES CI-DESSOUS MATCHENT TON FICHIER HTML :
-        res[t] = {
-            "current_Ic": ic,
-            "ecart": ecart,
-            "opponent": opponent,
-            "last_odds": last_odds,
-            "zone": zone,
-            "heure_estimee": "IMMINENT" if ic > 1.2 else "--:--",
-            "scores_conseilles": ["2-1", "1-2", "1-1"] if ic > 0.5 else ["0-0"]
-        }
-    conn.close()
-    return res
-
-@app.get("/")
-def home(): return {"status": "online"}
+async def dashboard():
+    all_preds = await scan_all_can_matches()
+    # On trie pour mettre les matchs les plus "surs" (96%) en haut
+    return sorted(all_preds, key=lambda x: x['ic'], reverse=True)
