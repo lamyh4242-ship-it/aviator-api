@@ -6,6 +6,7 @@ from scipy import stats
 from scipy.stats import poisson, chi2_contingency, entropy
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import httpx
 
 # ------------------------------------------------------------------------------------
@@ -15,7 +16,6 @@ DATABASE = "can_pro_analyzer.db"
 BASE_API = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
 LEAGUE_KEYWORD = "Africa" # pour identifier la CAN
 HISTORY_DEPTH = 30 # nombre de derniers matchs utilisés pour les stats
-UPDATE_INTERVAL = 120 # secondes entre deux scans
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"])
@@ -49,7 +49,8 @@ def init_db():
             timestamp TEXT,
             actual_home_score INTEGER,
             actual_away_score INTEGER,
-            validated INTEGER DEFAULT 0
+            validated INTEGER DEFAULT 0,
+            success INTEGER DEFAULT 0
         )
     """)
     # Cache des derniers scans pour analyse cyclique
@@ -102,7 +103,7 @@ async def fetch_finished_matches():
     return finished
 
 # ------------------------------------------------------------------------------------
-# GESTION DE L'HISTORIQUE (PERSISTANCE)
+# GESTION DE L'HISTORIQUE (PERSISTENCE)
 # ------------------------------------------------------------------------------------
 def save_finished_matches(matches):
     conn = sqlite3.connect(DATABASE); c = conn.cursor()
@@ -230,7 +231,6 @@ def runs_test(sequence):
     7. Test de Wald-Wolfowitz (runs) pour détecter le non-aléatoire.
     Retourne la p-value.
     """
-    # Simplification : on transforme en binaire (au-dessus/médiane)
     if not sequence:
         return 0.5
     median = np.median(sequence)
@@ -365,7 +365,6 @@ def compute_composite_prediction(home, away, all_histories):
     cycle_score = cycle_detection_score(home_gf_seq)
 
     # SCORE COMPOSITE (pondération empirique)
-    # Basé sur : plus les indicateurs sont "anormaux", plus la confiance monte
     base_confidence = (
         0.15 * (1 - min(chi_p, 0.9)) + # faible p-value = pattern
         0.15 * (1 - min(ent_home/3, 1)) + # faible entropie
@@ -486,6 +485,12 @@ async def validation_loop():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(validation_loop())
+
+# ------------------------------------------------------------------------------------
+# SERVIR LE FRONTEND
+# ------------------------------------------------------------------------------------
+# Monte le dossier static à la racine, index.html sera servi automatiquement
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 # ------------------------------------------------------------------------------------
 if __name__ == "__main__":
