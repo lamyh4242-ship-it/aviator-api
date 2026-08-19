@@ -1,1 +1,137 @@
-index.html
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#02050e">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>MATRIX VIRTUAL PRO - GOALS 96%</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        body { background:#02050e; color:#edf2ff; padding:12px; min-height:100vh; }
+        .app { max-width:480px; margin:0 auto; }
+        
+        .header { text-align: center; padding: 15px 10px; border-bottom: 1px solid #1a2642; margin-bottom: 15px; }
+        .header h1 { font-size:1.3rem; color:#4980f5; letter-spacing:1px; text-transform:uppercase; font-weight:900; }
+        .subtitle { font-size:0.65rem; color:#64748b; margin-top:3px; }
+        
+        .card { background:#0f172a; border-radius:18px; padding:16px; margin-bottom:14px; border:1px solid #253656; position:relative; overflow:hidden; }
+        .card.red-alert { border:2px solid #ff4d4d; box-shadow: 0 0 15px rgba(255,77,77,0.3); animation: pulse 1.5s infinite; }
+        
+        .card-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; }
+        .league-title { font-size:1.1rem; font-weight:800; color:#ffffff; }
+        .badge { display:inline-block; padding:3px 8px; border-radius:6px; font-size:0.65rem; font-weight:bold; }
+        .badge-observation { background:#00ff8820; color:#00ff88; }
+        .badge-tension { background:#f1c40f20; color:#f1c40f; }
+        .badge-alert { background:#ff4d4d20; color:#ff4d4d; }
+
+        .gauge-container { background:#02050e; padding:10px; border-radius:12px; margin-bottom:12px; }
+        .gauge-label { display:flex; justify-content:space-between; font-size:0.7rem; color:#94a3b8; margin-bottom:6px; font-weight:bold; }
+        .progress-bar-bg { background:#1e293b; height:10px; border-radius:5px; overflow:hidden; }
+        .progress-bar-fill { height:100%; transition: width 0.8s ease-in-out; }
+
+        .info-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:12px; }
+        .info-box { background:#1e293b60; padding:8px 10px; border-radius:8px; text-align:center; }
+        .info-val { font-size:1rem; font-weight:bold; color:#4980f5; }
+        .info-lbl { font-size:0.6rem; color:#64748b; text-transform:uppercase; margin-top:2px; }
+
+        .targets-box { background:#02050e; padding:10px; border-radius:10px; margin-bottom:10px; }
+        .targets-title { font-size:0.65rem; color:#94a3b8; text-transform:uppercase; font-weight:bold; margin-bottom:6px; }
+        .target-item { font-size:0.8rem; font-weight:600; color:#e2e8f0; padding:2px 0; }
+
+        .rec-box { background:#4980f515; border:1px dashed #4980f5; border-radius:10px; padding:10px; text-align:center; }
+        .scores-flex { display:flex; justify-content:center; gap:6px; margin-top:6px; }
+        .score-chip { background:#4980f5; color:white; font-size:0.75rem; font-weight:bold; padding:2px 8px; border-radius:4px; }
+
+        @keyframes pulse { 0% { border-color: #ff4d4d; } 50% { border-color: #7a1a1a; } 100% { border-color: #ff4d4d; } }
+        .loading { text-align:center; padding:40px 10px; color:#64748b; font-size:0.9rem; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="header">
+            <h1>⚽ MATRIX VIRTUAL 96%</h1>
+            <div class="subtitle">ANALYSEUR DE PRESSION DE BUTS (PRNG)</div>
+        </div>
+
+        <div id="container">
+            <div class="loading">Connexion au serveur mathématique...</div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "https://aviator-api-a3q4.onrender.com/dashboard";
+
+        async function refreshData() {
+            try {
+                const res = await fetch(API_URL);
+                const data = await res.json();
+                const container = document.getElementById('container');
+
+                if (!data || data.length === 0) {
+                    container.innerHTML = '<div class="loading">Analyse des flux en cours...</div>';
+                    return;
+                }
+
+                container.innerHTML = '';
+
+                data.forEach(item => {
+                    let color = item.confidence >= 90 ? '#ff4d4d' : (item.confidence >= 70 ? '#f1c40f' : '#00ff88');
+                    let badgeClass = item.confidence >= 90 ? 'badge-alert' : (item.confidence >= 70 ? 'badge-tension' : 'badge-observation');
+                    let isAlert = item.confidence >= 90 ? 'red-alert' : '';
+
+                    container.innerHTML += `
+                        <div class="card ${isAlert}">
+                            <div class="card-top">
+                                <div>
+                                    <div class="league-title">${item.league}</div>
+                                </div>
+                                <span class="badge ${badgeClass}">${item.zone}</span>
+                            </div>
+
+                            <div class="gauge-container">
+                                <div class="gauge-label">
+                                    <span>PRESSION DES BUTS</span>
+                                    <span style="color:${color}">${item.confidence}%</span>
+                                </div>
+                                <div class="progress-bar-bg">
+                                    <div class="progress-bar-fill" style="width:${item.confidence}%; background:${color}"></div>
+                                </div>
+                            </div>
+
+                            <div class="info-grid">
+                                <div class="info-box">
+                                    <div class="info-val">${item.ic_tension}</div>
+                                    <div class="info-lbl">Indice Ic (Tension)</div>
+                                </div>
+                                <div class="info-box">
+                                    <div class="info-val" style="color:${color}">${item.recommended_bet}</div>
+                                    <div class="info-lbl">Option Conseil</div>
+                                </div>
+                            </div>
+
+                            <div class="targets-box">
+                                <div class="targets-title">🎯 CIBLES DU PROCHAIN TOUR :</div>
+                                ${item.targets.map(t => `<div class="target-item">• ${t}</div>`).join('')}
+                            </div>
+
+                            <div class="rec-box">
+                                <div class="targets-title" style="color:#4980f5">SCORES DE COUVERTURE :</div>
+                                <div class="scores-flex">
+                                    ${item.scores.map(s => `<span class="score-chip">${s}</span>`).join('')}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+            } catch (e) {
+                console.error("Erreur de synchronisation:", e);
+            }
+        }
+
+        setInterval(refreshData, 5000);
+        refreshData();
+    </script>
+</body>
+</html>
