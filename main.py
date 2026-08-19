@@ -9,8 +9,8 @@ def read_root():
 
 @app.get("/dashboard")
 async def get_dashboard():
-    # Endpoint global des catégories virtuelles
-    target_api = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues/categories"
+    # On cible l'endpoint des plannings/rondes pour cette catégorie
+    target_api = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues/schedules?eventCategoryId=1616288&parentEventCategoryId=8035"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
