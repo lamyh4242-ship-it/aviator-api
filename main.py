@@ -4,7 +4,7 @@ import asyncio
 
 app = FastAPI()
 
-BASE_API_URL = https://bet261.mg/virtual
+BASE_API_URL = "https://bet261.mg/virtual"
 
 @app.get("/")
 def read_root():
