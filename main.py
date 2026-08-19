@@ -3,7 +3,6 @@ import httpx
 
 app = FastAPI()
 
-# On cible directement le fichier de données JSON officiel du site
 TARGET_URL = "https://bet261.mg/seo_virtual.json"
 
 @app.get("/")
@@ -22,9 +21,16 @@ async def get_dashboard():
         try:
             r = await client.get(TARGET_URL, headers=headers, timeout=15.0)
             
+            # On tente de décoder le JSON proprement, sinon on récupère le texte brut
+            try:
+                data_content = r.json()
+            except:
+                data_content = r.text[:1000] # Affiche les 1000 premiers caractères du texte brut
+            
             return {
                 "status_http": r.status_code,
-                "data": r.json() if r.status_code == 200 else r.text
+                "content_type": r.headers.get("content-type"),
+                "data": data_content
             }
             
         except Exception as e:
