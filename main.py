@@ -1,133 +1,51 @@
-import asyncio, math, sqlite3, time, httpx, os
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
-
-DATABASE = "/tmp/matrix_virtual.db"
-BASE_API_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
+import httpx
+import asyncio
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# PLUS AUCUN 'app.mount' QUI FAIT PLANTER LE SERVEUR.
-# On gère l'affichage de manière 100% sécurisée :
+BASE_API_URL = https://bet261.mg/virtual
 
 @app.get("/")
-async def read_index():
-    # 1. On cherche d'abord dans le dossier static (si tu l'as mis là)
-    if os.path.exists("static/index.html"):
-        return FileResponse("static/index.html")
-    # 2. Sinon, on cherche à la racine (au cas où tu l'as mis au même endroit que main.py)
-    elif os.path.exists("index.html"):
-        return FileResponse("index.html")
-    
-    # 3. Si on ne trouve vraiment rien, on ne crashe pas ! On affiche un message d'information.
-    return HTMLResponse("<h1 style='color:white; background:black; padding:20px;'>Le serveur Python fonctionne !</h1><p>Il ne trouve juste pas ton fichier index.html, mais l'API est en ligne.</p>")
-
-def init_db():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS system_tracker 
-                 (league TEXT PRIMARY KEY, ecart_under INTEGER, lambda_mu REAL, last_scan INTEGER)''')
-    c.execute("INSERT OR IGNORE INTO system_tracker VALUES ('England Virtual', 0, 2.5, 0)")
-    c.execute("INSERT OR IGNORE INTO system_tracker VALUES ('Africa Cup', 0, 2.1, 0)")
-    conn.commit(); conn.close()
-
-init_db()
-
-async def analyze_algorithm_pressure():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
-    }
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
-        try:
-            r = await client.get(BASE_API_URL, timeout=10)
-            leagues = r.json()
-            
-            if isinstance(leagues, dict):
-                leagues = leagues.get("data", leagues.get("leagues", []))
-            
-            targets = {}
-            if isinstance(leagues, list):
-                for l in leagues:
-                    name = str(l.get('name', '')).lower()
-                    lid = l.get('id')
-                    if not lid: continue
-                    
-                    if any(k in name for k in ["england", "english", "premier", "anglaise"]):
-                        targets["England Virtual"] = lid
-                    elif any(k in name for k in ["africa", "can", "afrique", "coupe"]):
-                        targets["Africa Cup"] = lid
-
-                if not targets and len(leagues) > 0:
-                    for idx, l in enumerate(leagues[:2]):
-                        targets[l.get('name', f'Ligue {idx+1}')] = l.get('id')
-
-            conn = sqlite3.connect(DATABASE); c = conn.cursor()
-            results = []
-            current_time = int(time.time())
-            
-            for lg_name, lg_id in targets.items():
-                if not lg_id: continue
-                
-                res = await client.get(f"{BASE_API_URL}/playout?eventCategoryId={lg_id}", timeout=10)
-                res_data = res.json()
-                matches = res_data.get("matches", []) if isinstance(res_data, dict) else []
-                
-                c.execute("SELECT ecart_under, lambda_mu, last_scan FROM system_tracker WHERE league=?", (lg_name,))
-                row = c.fetchone()
-                ecart = row[0] if row else 0
-                lam = row[1] if row else 2.5
-                last_scan = row[2] if row else 0
-                
-                if current_time - last_scan > 120:
-                    ecart += 1 
-                    c.execute("INSERT OR REPLACE INTO system_tracker VALUES (?, ?, ?, ?)", (lg_name, ecart, lam, current_time))
-                
-                N_const = 3.0 if "england" in lg_name.lower() else 4.0
-                ic = round((ecart / N_const) * math.log(ecart + 2), 2)
-                
-                poisson_0 = math.exp(-lam)
-                poisson_1 = poisson_0 * lam
-                prob_over_1_5 = (1 - (poisson_0 + poisson_1)) * 100
-                
-                confidence = min(int(prob_over_1_5 + (ic * 15)), 96) 
-                
-                zone = "OBSERVATION"
-                if confidence >= 90: zone = "ALERTE ROUGE"
-                elif confidence >= 70: zone = "TENSION"
-                
-                upcoming = [f"{m.get('homeTeamName','Équipe A')} vs {m.get('awayTeamName','Équipe B')}" for m in matches[:3]]
-                if not upcoming:
-                    upcoming = ["Prochains matchs en attente..."]
-                
-                if confidence >= 96 and current_time - last_scan > 120:
-                    c.execute("UPDATE system_tracker SET ecart_under=0 WHERE league=?", (lg_name,))
-                
-                results.append({
-                    "league": lg_name,
-                    "ic_tension": ic,
-                    "confidence": confidence,
-                    "zone": zone,
-                    "targets": upcoming,
-                    "recommended_bet": "OVER 1.5 BUTS" if confidence >= 70 else "ATTENDRE",
-                    "scores": ["2-1", "1-2", "2-2"] if confidence >= 90 else ["1-1", "2-0", "0-2"]
-                })
-                
-            conn.commit(); conn.close()
-            return sorted(results, key=lambda x: x['confidence'], reverse=True)
-            
-        except Exception as e:
-            print(f"Erreur Scan: {e}")
-            return []
+def read_root():
+    return {"message": "Le serveur Python fonctionne ! Il ne trouve juste pas ton fichier index.html, mais l'API est en ligne."}
 
 @app.get("/dashboard")
-async def dashboard():
-    return await analyze_algorithm_pressure()
+async def get_dashboard():
+    # Ces 'headers' servent à imiter un vrai navigateur (Anti-bot)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            # On envoie la requête avec notre "déguisement"
+            r = await client.get(BASE_API_URL, headers=headers, timeout=15.0)
+            
+            # --- LIGNES DE DEBUG POUR RENDER ---
+            print("=== DEBUT DU DEBUG ===")
+            print(f"Statut HTTP reçu : {r.status_code}")
+            print(f"Contenu brut (500 premiers caractères) : {r.text[:500]}")
+            print("=== FIN DU DEBUG ===")
+            # -----------------------------------
+
+            # Si le site renvoie une erreur (comme 403 Forbidden)
+            r.raise_for_status() 
+            
+            # On essaie de convertir la réponse en JSON
+            data = r.json()
+            
+            # Note: Si tu avais un filtre pour "england", "premier" etc, 
+            # tu peux le remettre ici. Pour l'instant, on renvoie tout pour tester.
+            return data
+            
+        except Exception as e:
+            print(f"ERREUR CRITIQUE : {str(e)}")
+            return {
+                "error": "Impossible de récupérer les données",
+                "details": str(e),
+                "conseil": "Va voir l'onglet 'Logs' sur Render pour comprendre l'erreur."
+            }
