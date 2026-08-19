@@ -1,8 +1,7 @@
 import asyncio, math, sqlite3, time, httpx, os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 DATABASE = "/tmp/matrix_virtual.db"
 BASE_API_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
@@ -16,17 +15,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Connecter le dossier static pour afficher le HTML sur la page d'accueil
-if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+# PLUS AUCUN 'app.mount' QUI FAIT PLANTER LE SERVEUR.
+# On gère l'affichage de manière 100% sécurisée :
 
 @app.get("/")
 async def read_index():
-    # Si le fichier index.html existe, on l'affiche directement
+    # 1. On cherche d'abord dans le dossier static (si tu l'as mis là)
     if os.path.exists("static/index.html"):
         return FileResponse("static/index.html")
-    # Sinon, on affiche un message de secours
-    return {"status": "Le serveur Python est à jour ! Mais index.html est introuvable."}
+    # 2. Sinon, on cherche à la racine (au cas où tu l'as mis au même endroit que main.py)
+    elif os.path.exists("index.html"):
+        return FileResponse("index.html")
+    
+    # 3. Si on ne trouve vraiment rien, on ne crashe pas ! On affiche un message d'information.
+    return HTMLResponse("<h1 style='color:white; background:black; padding:20px;'>Le serveur Python fonctionne !</h1><p>Il ne trouve juste pas ton fichier index.html, mais l'API est en ligne.</p>")
 
 def init_db():
     conn = sqlite3.connect(DATABASE)
@@ -41,7 +43,7 @@ init_db()
 
 async def analyze_algorithm_pressure():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json"
     }
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
