@@ -9,8 +9,8 @@ def read_root():
 
 @app.get("/dashboard")
 async def get_dashboard():
-    # On cible l'une des requêtes dynamiques qu'on voit dans ta liste (ex: playout)
-    target_api = "https://hg-event-api-prod.sporty-tech.net/api/public/playout?eventCategoryId=1"
+    # L'URL exacte de l'API SportyTech récupérée de ton navigateur
+    target_api = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues/round/26/playout?eventCategoryId=1616288&parentEventCategoryId=8035"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
