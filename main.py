@@ -3,7 +3,8 @@ import httpx
 
 app = FastAPI()
 
-TARGET_URL = "https://bet261.mg/seo_virtual.json"
+# URL de l'API customer de SportyTech trouvée dans config.json
+API_URL = "https://hg-customer-api-prod.sporty-tech.net/api/"
 
 @app.get("/")
 def read_root():
@@ -13,19 +14,20 @@ def read_root():
 async def get_dashboard():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://bet261.mg/virtual"
+        "Origin": "https://bet261.mg",
+        "Referer": "https://bet261.mg/",
+        "Accept": "application/json, text/plain, */*"
     }
     
     async with httpx.AsyncClient() as client:
         try:
-            r = await client.get(TARGET_URL, headers=headers, timeout=15.0)
+            # On interroge une route courante de l'API SportyTech (ex: configuration ou bannières/sports)
+            r = await client.get(f"{API_URL}common/client-config", headers=headers, timeout=15.0)
             
-            # On tente de décoder le JSON proprement, sinon on récupère le texte brut
             try:
                 data_content = r.json()
             except:
-                data_content = r.text[:1000] # Affiche les 1000 premiers caractères du texte brut
+                data_content = r.text[:1000]
             
             return {
                 "status_http": r.status_code,
