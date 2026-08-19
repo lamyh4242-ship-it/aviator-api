@@ -3,15 +3,15 @@ import httpx
 
 app = FastAPI()
 
-# URL de l'API customer de SportyTech trouvée dans config.json
-API_URL = "https://hg-customer-api-prod.sporty-tech.net/api/"
-
 @app.get("/")
 def read_root():
     return {"message": "Le serveur de scraping Bet261 est en ligne !"}
 
 @app.get("/dashboard")
 async def get_dashboard():
+    # On cible l'une des requêtes dynamiques qu'on voit dans ta liste (ex: playout)
+    target_api = "https://hg-event-api-prod.sporty-tech.net/api/public/playout?eventCategoryId=1"
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Origin": "https://bet261.mg",
@@ -21,8 +21,7 @@ async def get_dashboard():
     
     async with httpx.AsyncClient() as client:
         try:
-            # On interroge une route courante de l'API SportyTech (ex: configuration ou bannières/sports)
-            r = await client.get(f"{API_URL}common/client-config", headers=headers, timeout=15.0)
+            r = await client.get(target_api, headers=headers, timeout=15.0)
             
             try:
                 data_content = r.json()
