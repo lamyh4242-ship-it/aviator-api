@@ -4,9 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#02050e">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>MATRIX VIRTUAL PRO - GOALS 96%</title>
+    <title>MATRIX VIRTUAL 96%</title>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
         body { background:#02050e; color:#edf2ff; padding:12px; min-height:100vh; }
@@ -51,7 +49,8 @@
 <body>
     <div class="app">
         <div class="header">
-            <h1>⚽ MATRIX VIRTUAL 96%</h1>
+            <!-- Correction du bug d'encodage de l'émoji ici : -->
+            <h1>&#9917; MATRIX VIRTUAL 96%</h1>
             <div class="subtitle">ANALYSEUR DE PRESSION DE BUTS (PRNG)</div>
         </div>
 
@@ -70,7 +69,7 @@
                 const container = document.getElementById('container');
 
                 if (!data || data.length === 0) {
-                    container.innerHTML = '<div class="loading">Analyse des flux en cours...</div>';
+                    container.innerHTML = '<div class="loading" style="color:#f1c40f;">Recherche des ligues actives sur Bet261... Attends quelques secondes.</div>';
                     return;
                 }
 
@@ -127,6 +126,7 @@
                 });
             } catch (e) {
                 console.error("Erreur de synchronisation:", e);
+                document.getElementById('container').innerHTML = '<div class="loading" style="color:#ff4d4d">Erreur de connexion au serveur Render. Le serveur est peut-être en train de redémarrer.</div>';
             }
         }
 
