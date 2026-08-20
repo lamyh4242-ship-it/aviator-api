@@ -1,18 +1,22 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import HTMLResponse
-import httpx, asyncio, random, sqlite3, threading
+import httpx, asyncio, random, sqlite3
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 app = FastAPI()
 
-# ------------------- CONFIGURATION DES LIGUES (à modifier selon tes IDs) -------------------
-# Format : "Nom de la ligue": {"event_id": "valeur", "parent_id": 8035}
+# ------------------- CONFIGURATION DES LIGUES -------------------
 LEAGUES = {
-    "CAN": {"event_id": "161769", "parent_id": 8035},
-    "Fast English League": {"event_id": "161769", "parent_id": 8035}, # ⚠️ Remplace par l'ID réel
-    "Coupe du Monde": {"event_id": "161769", "parent_id": 8035}, # ⚠️ Remplace par l'ID réel
-    # Ajoute d'autres ligues ici si nécessaire
+    "English League": {"event_id": "161777", "parent_id": 8035},
+    "Champions League": {"event_id": "161771", "parent_id": 8056},
+    "CAN": {"event_id": "161778", "parent_id": 8060},
+    "Coupe du Monde": {"event_id": "161758", "parent_id": 8065},
+    "Spanish League": {"event_id": "161775", "parent_id": 8037},
+    "Italie League": {"event_id": "161776", "parent_id": 8036},
+    "French League": {"event_id": "161782", "parent_id": 8042},
+    "German League": {"event_id": "161780", "parent_id": 8043},
+    "Portugal League": {"event_id": "161781", "parent_id": 8044},
 }
 
 # ------------------- Autres constantes -------------------
@@ -24,9 +28,8 @@ USER_AGENTS = [
 
 BASE_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
 DB_FILENAME = "history.db"
-LOCK = threading.Lock()
 
-# ------------------- Base de données (seulement pour l'historique) -------------------
+# ------------------- Base de données (pour l'historique) -------------------
 def init_db():
     with sqlite3.connect(DB_FILENAME) as conn:
         conn.execute("""
@@ -192,19 +195,45 @@ async def api_dashboard(
         save_matches(league, active_round, scores)
         history = get_history(league, limit=50)
 
-        # Prédictions simples (comme dans la version précédente)
+        # Prédictions simples
         predictions = []
         if history:
             total_goals = sum(m["home_score"] + m["away_score"] for m in history)
             avg_goals = total_goals / len(history)
+            
             if avg_goals < 2.0:
-                predictions.append({"type": "under", "message": f"Moyenne faible ({avg_goals:.1f} buts/match) → Pensez aux paris Under 2.5."})
+                predictions.append({
+                    "type": "under",
+                    "message": f"Moyenne faible sur {len(history)} matchs ({avg_goals:.1f} buts/match) → Pensez aux paris Under 2.5."
+                })
             elif avg_goals > 3.5:
-                predictions.append({"type": "over", "message": f"Moyenne élevée ({avg_goals:.1f} buts/match) → Pensez aux paris Over 2.5."})
+                predictions.append({
+                    "type": "over",
+                    "message": f"Moyenne élevée ({avg_goals:.1f} buts/match) → Pensez aux paris Over 2.5."
+                })
+            
+            # Détection de tendance récente
+            recent_5 = history[:5]
+            recent_avg = sum(m["home_score"] + m["away_score"] for m in recent_5) / len(recent_5)
+            if len(history) >= 5 and recent_avg < avg_goals * 0.7:
+                predictions.append({
+                    "type": "trend_down",
+                    "message": f"Tendance à la baisse sur les 5 derniers matchs ({recent_avg:.1f} vs {avg_goals:.1f}) → Possible match serré."
+                })
+            
+            # Analyse des scores actuels faibles
             for score in scores:
                 total = score["home_score"] + score["away_score"]
                 if total == 0:
-                    predictions.append({"type": "no_goal", "message": f"Match #{score['match_id']} : 0-0 → Cote intéressante sur Under."})
+                    predictions.append({
+                        "type": "no_goal",
+                        "message": f"Match #{score['match_id']} : 0-0 → Cote intéressante sur Under."
+                    })
+                elif total <= 1:
+                    predictions.append({
+                        "type": "low_scoring",
+                        "message": f"Match #{score['match_id']} : {score['home_score']}-{score['away_score']} → Match fermé, attention au nul."
+                    })
 
         return {
             "league": league,
