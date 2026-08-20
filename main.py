@@ -1,12 +1,21 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import HTMLResponse
 import httpx, asyncio, random, sqlite3, threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 app = FastAPI()
 
-# ------------------- Configuration & Constantes -------------------
+# ------------------- CONFIGURATION DES LIGUES (à modifier selon tes IDs) -------------------
+# Format : "Nom de la ligue": {"event_id": "valeur", "parent_id": 8035}
+LEAGUES = {
+    "CAN": {"event_id": "161769", "parent_id": 8035},
+    "Fast English League": {"event_id": "161769", "parent_id": 8035}, # ⚠️ Remplace par l'ID réel
+    "Coupe du Monde": {"event_id": "161769", "parent_id": 8035}, # ⚠️ Remplace par l'ID réel
+    # Ajoute d'autres ligues ici si nécessaire
+}
+
+# ------------------- Autres constantes -------------------
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
@@ -14,22 +23,12 @@ USER_AGENTS = [
 ]
 
 BASE_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
-PARENT_ID_DEFAULT = 8035
-DB_FILENAME = "scraper_data.db"
+DB_FILENAME = "history.db"
 LOCK = threading.Lock()
 
-# ------------------- Base de données -------------------
+# ------------------- Base de données (seulement pour l'historique) -------------------
 def init_db():
-    """Crée les tables si elles n'existent pas."""
     with sqlite3.connect(DB_FILENAME) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS leagues (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                event_id TEXT NOT NULL,
-                parent_id INTEGER DEFAULT 8035
-            )
-        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,34 +43,7 @@ def init_db():
         """)
         conn.commit()
 
-def add_default_leagues():
-    """Insère les ligues par défaut si elles n'existent pas."""
-    default_leagues = [
-        ("CAN", "161769"),
-        ("Fast English League", "161769"), # À remplacer par l'event_id réel
-        ("Coupe du Monde", "161769"), # À remplacer
-    ]
-    with sqlite3.connect(DB_FILENAME) as conn:
-        for name, event_id in default_leagues:
-            conn.execute(
-                "INSERT OR IGNORE INTO leagues (name, event_id, parent_id) VALUES (?, ?, ?)",
-                (name, event_id, PARENT_ID_DEFAULT)
-            )
-        conn.commit()
-
-def get_league_info(league_name: str) -> Optional[Dict[str, Any]]:
-    """Récupère les informations d'une ligue."""
-    with sqlite3.connect(DB_FILENAME) as conn:
-        row = conn.execute(
-            "SELECT name, event_id, parent_id FROM leagues WHERE name = ?",
-            (league_name,)
-        ).fetchone()
-        if row:
-            return {"name": row[0], "event_id": row[1], "parent_id": row[2]}
-    return None
-
 def save_matches(league_name: str, round_num: int, scores: List[Dict[str, int]]):
-    """Enregistre les scores des matchs d'une ronde."""
     timestamp = datetime.utcnow().isoformat()
     with sqlite3.connect(DB_FILENAME) as conn:
         for score in scores:
@@ -89,7 +61,6 @@ def save_matches(league_name: str, round_num: int, scores: List[Dict[str, int]])
         conn.commit()
 
 def get_history(league_name: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """Récupère l'historique des matchs d'une ligue (les plus récents)."""
     with sqlite3.connect(DB_FILENAME) as conn:
         rows = conn.execute(
             """
@@ -102,60 +73,6 @@ def get_history(league_name: str, limit: int = 50) -> List[Dict[str, Any]]:
             (league_name, limit)
         ).fetchall()
         return [{"match_id": r[0], "round_num": r[1], "home_score": r[2], "away_score": r[3], "timestamp": r[4]} for r in rows]
-
-def compute_predictions(history: List[Dict[str, Any]], current_scores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Analyse l'historique et les scores actuels pour générer des alertes simples.
-    Règles de base :
-    - Moyenne de buts par match faible sur les 10 derniers matchs → alerte "sous".
-    - Moyenne élevée → alerte "over".
-    - Score actuel proche de la fin et total faible → alerte "but tardif probable".
-    """
-    predictions = []
-    if not history:
-        return predictions
-
-    # Statistiques globales
-    total_goals = sum(m["home_score"] + m["away_score"] for m in history)
-    avg_goals = total_goals / len(history)
-    recent_5 = history[:5]
-    recent_avg = sum(m["home_score"] + m["away_score"] for m in recent_5) / len(recent_5)
-
-    # Seuils arbitraires (à ajuster)
-    if avg_goals < 2.0:
-        predictions.append({
-            "type": "under",
-            "message": f"Moyenne faible sur {len(history)} matchs ({avg_goals:.1f} buts/match) → Pensez aux paris 'Under 2.5'."
-        })
-    elif avg_goals > 3.5:
-        predictions.append({
-            "type": "over",
-            "message": f"Moyenne élevée ({avg_goals:.1f} buts/match) → Pensez aux paris 'Over 2.5'."
-        })
-
-    # Détection d'une baisse récente
-    if len(history) >= 5 and recent_avg < avg_goals * 0.7:
-        predictions.append({
-            "type": "trend_down",
-            "message": f"Tendance à la baisse sur les 5 derniers matchs ({recent_avg:.1f} vs {avg_goals:.1f}) → Possible match serré."
-        })
-
-    # Analyse des matchs en cours : si un match a moins de 1 but à la 70e minute (simulé ici)
-    # Ici on ne connaît pas la minute exacte, mais on peut juste alerter sur les scores faibles actuels
-    for score in current_scores:
-        total = score["home_score"] + score["away_score"]
-        if total == 0:
-            predictions.append({
-                "type": "no_goal",
-                "message": f"Match #{score['match_id']} : 0-0 pour l'instant, risque de rester vierge → Cote intéressante sur Under."
-            })
-        elif total <= 1:
-            predictions.append({
-                "type": "low_scoring",
-                "message": f"Match #{score['match_id']} : {score['home_score']}-{score['away_score']} → Match fermé, attention au nul."
-            })
-
-    return predictions
 
 # ------------------- Fonctions utilitaires -------------------
 def build_headers():
@@ -190,7 +107,6 @@ async def fetch_json(client, url, params=None, retries=3):
     return {"error": "Échec après plusieurs tentatives"}
 
 def parse_scores(data):
-    """Extrait les scores finaux (derniers buts) de chaque match."""
     matches = data.get("matches", [])
     scores = []
     for match in matches:
@@ -209,24 +125,19 @@ def parse_scores(data):
             })
     return scores
 
-async def find_active_round(client, event_id: str, parent_id: int, start_round: int = 1, max_round: int = 100) -> Optional[int]:
-    """
-    Cherche la première ronde active (statut 200) en partant de start_round.
-    Si start_round est trop ancien, on essaie les suivantes.
-    """
+async def find_active_round(client, event_id: str, parent_id: int, start_round: int = 1, max_round: int = 100):
     for round_num in range(start_round, max_round + 1):
         url = f"{BASE_URL}/round/{round_num}/playout"
         params = {"eventCategoryId": event_id, "parentEventCategoryId": parent_id}
         result = await fetch_json(client, url, params)
         if result.get("status_http") == 200 and result.get("data"):
             return round_num
-        # Si on obtient 400, on continue ; si 403, on s'arrête
         if result.get("status_http") == 403:
             break
-        await asyncio.sleep(0.2) # petit délai pour éviter le rate-limit
+        await asyncio.sleep(0.2)
     return None
 
-async def get_scores_for_round(client, event_id: str, parent_id: int, round_num: int) -> Optional[List[Dict[str, Any]]]:
+async def get_scores_for_round(client, event_id: str, parent_id: int, round_num: int):
     url = f"{BASE_URL}/round/{round_num}/playout"
     params = {"eventCategoryId": event_id, "parentEventCategoryId": parent_id}
     result = await fetch_json(client, url, params)
@@ -238,7 +149,6 @@ async def get_scores_for_round(client, event_id: str, parent_id: int, round_num:
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    add_default_leagues()
 
 # ------------------- Endpoints API -------------------
 @app.get("/")
@@ -247,29 +157,22 @@ def root():
 
 @app.get("/api/leagues")
 async def get_leagues():
-    with sqlite3.connect(DB_FILENAME) as conn:
-        rows = conn.execute("SELECT name, event_id FROM leagues").fetchall()
-        return [{"name": r[0], "event_id": r[1]} for r in rows]
+    return [{"name": name} for name in LEAGUES.keys()]
 
 @app.get("/api/dashboard")
 async def api_dashboard(
-    league: str = Query(..., description="Nom de la ligue (ex: CAN, Fast English League)"),
-    start_round: int = Query(1, description="Ronde de départ pour la recherche (habituellement 1)"),
-    max_round: int = Query(100, description="Ronde maximale à tester")
+    league: str = Query(..., description="Nom de la ligue"),
+    start_round: int = Query(1, description="Ronde de départ pour la recherche")
 ):
-    """
-    Endpoint principal appelé par la page web.
-    Trouve la ronde active, récupère les scores, les enregistre, calcule les prédictions.
-    """
-    league_info = get_league_info(league)
-    if not league_info:
-        raise HTTPException(status_code=404, detail=f"Ligue '{league}' inconnue. Ajoutez-la dans la base.")
-
+    if league not in LEAGUES:
+        raise HTTPException(status_code=404, detail=f"Ligue '{league}' inconnue. Vérifiez le nom ou ajoutez-la dans le code.")
+    
+    league_info = LEAGUES[league]
     event_id = league_info["event_id"]
     parent_id = league_info["parent_id"]
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        active_round = await find_active_round(client, event_id, parent_id, start_round, max_round)
+        active_round = await find_active_round(client, event_id, parent_id, start_round)
         if active_round is None:
             return {
                 "league": league,
@@ -286,12 +189,22 @@ async def api_dashboard(
                 "status": "error"
             }
 
-        # Sauvegarde dans l'historique
         save_matches(league, active_round, scores)
-
-        # Récupère l'historique pour les prédictions
         history = get_history(league, limit=50)
-        predictions = compute_predictions(history, scores)
+
+        # Prédictions simples (comme dans la version précédente)
+        predictions = []
+        if history:
+            total_goals = sum(m["home_score"] + m["away_score"] for m in history)
+            avg_goals = total_goals / len(history)
+            if avg_goals < 2.0:
+                predictions.append({"type": "under", "message": f"Moyenne faible ({avg_goals:.1f} buts/match) → Pensez aux paris Under 2.5."})
+            elif avg_goals > 3.5:
+                predictions.append({"type": "over", "message": f"Moyenne élevée ({avg_goals:.1f} buts/match) → Pensez aux paris Over 2.5."})
+            for score in scores:
+                total = score["home_score"] + score["away_score"]
+                if total == 0:
+                    predictions.append({"type": "no_goal", "message": f"Match #{score['match_id']} : 0-0 → Cote intéressante sur Under."})
 
         return {
             "league": league,
@@ -302,18 +215,9 @@ async def api_dashboard(
             "status": "ok"
         }
 
-@app.get("/api/history")
-async def api_history(
-    league: str = Query(..., description="Nom de la ligue"),
-    limit: int = Query(50, description="Nombre de matchs à retourner")
-):
-    history = get_history(league, limit)
-    return {"league": league, "history": history}
-
 # ------------------- Interface Web -------------------
 @app.get("/dashboard")
 async def web_dashboard():
-    """Retourne la page HTML interactive."""
     html = """
     <!DOCTYPE html>
     <html>
@@ -419,7 +323,6 @@ async def web_dashboard():
 
             <select id="leagueSelect" onchange="loadDashboard()">
                 <option value="">-- Choisir une ligue --</option>
-                <!-- Les options seront remplies par JavaScript -->
             </select>
 
             <div id="statusMessage" class="status" style="display:none;"></div>
@@ -430,7 +333,6 @@ async def web_dashboard():
 
         <script>
             let refreshInterval = null;
-            let currentLeague = null;
 
             async function loadLeagues() {
                 const response = await fetch('/api/leagues');
@@ -448,7 +350,6 @@ async def web_dashboard():
                 const league = document.getElementById('leagueSelect').value;
                 if (!league) return;
 
-                currentLeague = league;
                 if (refreshInterval) clearInterval(refreshInterval);
                 refreshInterval = setInterval(loadDashboard, 10000);
 
@@ -465,7 +366,6 @@ async def web_dashboard():
                         statusEl.className = 'status status-ok';
                         statusEl.textContent = `✅ Ronde ${data.round} - ${data.scores.length} matchs`;
 
-                        // Affichage des scores
                         const scoresHtml = data.scores.map(score => `
                             <div class="match-card">
                                 <div class="match-id">#${score.match_id}</div>
@@ -475,7 +375,6 @@ async def web_dashboard():
                         `).join('');
                         document.getElementById('scoresContainer').innerHTML = scoresHtml;
 
-                        // Affichage des prédictions
                         const predsHtml = data.predictions.map(pred => `
                             <div class="prediction">
                                 <strong>🚨 ${pred.type}</strong>
@@ -497,7 +396,6 @@ async def web_dashboard():
                 }
             }
 
-            // Initialisation
             loadLeagues();
         </script>
     </body>
