@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import HTMLResponse
 import httpx, asyncio, random, sqlite3, math
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 app = FastAPI()
 
@@ -19,6 +19,12 @@ LEAGUES = {
     "Portugal League": {"event_id": "161781", "parent_id": 8044},
 }
 
+# Mapping statique de secours (à compléter si nécessaire)
+TEAM_NAME_MAP = {
+    # "123456": "Leeds United",
+    # "654321": "Manchester Blue",
+}
+
 # ------------------- CONSTANTES -------------------
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
@@ -28,20 +34,16 @@ USER_AGENTS = [
 
 BASE_URL = "https://hg-event-api-prod.sporty-tech.net/api/instantleagues"
 DB_FILENAME = "history.db"
-GAP_THRESHOLD = 40 # Nombre de matchs sans un score rare avant alerte
-STREAK_THRESHOLD = 5 # Victoires consécutives avant alerte de rupture
-POISSON_OVER_25_THRESHOLD = 0.75 # Probabilité seuil pour afficher "Match ouvert"
-
-# Mapping statique des noms d'équipes (fallback si le JSON ne fournit pas les noms)
-# Format : "match_id" ou identifiant d'équipe -> nom
-TEAM_NAME_MAP = {
-    # Exemple : "123456": "Leeds United"
-}
+POISSON_OVER_25_THRESHOLD = 0.70
+RARE_SCORES = [(4,0), (0,4), (3,3), (4,1), (1,4), (5,0), (0,5), (4,2), (2,4), (3,4), (4,3)]
+GAP_THRESHOLD = 40
+STREAK_NO_GOALS_AGAINST = 4
+STREAK_NO_DRAW = 5
+STREAK_WINS = 5
 
 # ------------------- BASE DE DONNÉES -------------------
 def init_db():
     with sqlite3.connect(DB_FILENAME) as conn:
-        # Table des matchs (avec équipes)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +58,6 @@ def init_db():
                 UNIQUE(match_id, league_name)
             )
         """)
-        # Table pour mémoriser la dernière ronde active par ligue
         conn.execute("""
             CREATE TABLE IF NOT EXISTS last_rounds (
                 league_name TEXT PRIMARY KEY,
@@ -66,7 +67,6 @@ def init_db():
         conn.commit()
 
 def save_matches(league_name: str, round_num: int, match_data: List[Dict[str, Any]]):
-    """Enregistre les matchs d'une ronde avec noms d'équipes."""
     timestamp = datetime.utcnow().isoformat()
     with sqlite3.connect(DB_FILENAME) as conn:
         for m in match_data:
@@ -88,7 +88,6 @@ def save_matches(league_name: str, round_num: int, match_data: List[Dict[str, An
                     m["home_score"], m["away_score"], timestamp
                 )
             )
-        # Met à jour la dernière ronde
         conn.execute(
             "INSERT INTO last_rounds (league_name, last_round) VALUES (?, ?) "
             "ON CONFLICT(league_name) DO UPDATE SET last_round = excluded.last_round",
@@ -104,7 +103,7 @@ def get_last_round(league_name: str) -> Optional[int]:
         ).fetchone()
         return row[0] if row else None
 
-def get_history(league_name: str, limit: int = 50) -> List[Dict[str, Any]]:
+def get_history(league_name: str, limit: int = 100) -> List[Dict[str, Any]]:
     with sqlite3.connect(DB_FILENAME) as conn:
         rows = conn.execute(
             """
@@ -128,8 +127,7 @@ def get_history(league_name: str, limit: int = 50) -> List[Dict[str, Any]]:
             }
             for r in rows
         ]
-
-# ------------------- FONCTIONS UTILITAIRES -------------------
+        # ------------------- FONCTIONS UTILITAIRES -------------------
 def build_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
@@ -154,53 +152,72 @@ async def fetch_json(client, url, params=None, retries=3):
                 data = r.json()
             except Exception:
                 data = r.text[:2000]
-            return {"status_http": r.status_code, "data": data, "url": str(r.url), "headers": r.headers}
+            return {"status_http": r.status_code, "data": data, "url": str(r.url)}
         except Exception as e:
             if attempt == retries - 1:
                 return {"error": str(e)}
             await asyncio.sleep(1)
     return {"error": "Échec après plusieurs tentatives"}
 
-def extract_team_names(match: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    """
-    Essaie d'extraire les noms d'équipes depuis le JSON.
-    Cherche dans plusieurs structures possibles.
-    """
+def extract_team_names(match: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Extrait les noms d'équipes en essayant toutes les structures possibles."""
     home = away = None
-    # Cas 1 : homeTeam / awayTeam
-    if "homeTeam" in match and isinstance(match["homeTeam"], dict):
-        home = match["homeTeam"].get("name")
-    if "awayTeam" in match and isinstance(match["awayTeam"], dict):
-        away = match["awayTeam"].get("name")
-    # Cas 2 : homeCompetitor / awayCompetitor
-    if not home and "homeCompetitor" in match and isinstance(match["homeCompetitor"], dict):
-        home = match["homeCompetitor"].get("name")
-    if not away and "awayCompetitor" in match and isinstance(match["awayCompetitor"], dict):
-        away = match["awayCompetitor"].get("name")
-    # Cas 3 : home / away (objets)
-    if not home and "home" in match and isinstance(match["home"], dict):
-        home = match["home"].get("name")
-    if not away and "away" in match and isinstance(match["away"], dict):
-        away = match["away"].get("name")
-    # Cas 4 : team1 / team2
-    if not home and "team1" in match and isinstance(match["team1"], dict):
-        home = match["team1"].get("name")
-    if not away and "team2" in match and isinstance(match["team2"], dict):
-        away = match["team2"].get("name")
-    # Fallback : dictionnaire statique
+
+    # 1. homeTeam / awayTeam (objets)
+    for container in ["homeTeam", "awayTeam", "home", "away"]:
+        if isinstance(match.get(container), dict):
+            obj = match[container]
+            name = obj.get("name") or obj.get("teamName") or obj.get("shortName") or obj.get("fullName")
+            if name:
+                if container in ("homeTeam", "home"):
+                    home = name
+                else:
+                    away = name
+
+    # 2. teams (liste d'objets)
+    if "teams" in match and isinstance(match["teams"], list) and len(match["teams"]) >= 2:
+        t1 = match["teams"][0]
+        t2 = match["teams"][1]
+        home = t1.get("name") or t1.get("teamName") or t1.get("shortName") or home
+        away = t2.get("name") or t2.get("teamName") or t2.get("shortName") or away
+
+    # 3. competitors (liste d'objets)
+    if "competitors" in match and isinstance(match["competitors"], list):
+        for comp in match["competitors"]:
+            if isinstance(comp, dict):
+                name = comp.get("name") or comp.get("teamName") or comp.get("shortName")
+                if not name:
+                    continue
+                if "home" in comp and comp["home"]:
+                    home = name
+                elif "away" in comp and comp["away"]:
+                    away = name
+                else:
+                    if home is None:
+                        home = name
+                    elif away is None:
+                        away = name
+
+    # 4. Champs directs
+    if not home:
+        home = match.get("homeTeamName") or match.get("home_name") or match.get("homeName") or match.get("home_team")
+    if not away:
+        away = match.get("awayTeamName") or match.get("away_name") or match.get("awayName") or match.get("away_team")
+
+    # 5. Fallback : IDs -> noms (mapping statique)
     match_id = str(match.get("id", ""))
     if not home and match_id in TEAM_NAME_MAP:
         home = TEAM_NAME_MAP[match_id]
     if not away and match_id in TEAM_NAME_MAP:
-        away = TEAM_NAME_MAP[match_id] # à ajuster si mapping différent
+        away = TEAM_NAME_MAP[match_id]
+
     return home, away
 
 def parse_scores(data) -> List[Dict[str, Any]]:
-    """Transforme le JSON de /playout en liste de matchs avec scores et noms."""
+    """Transforme le JSON de /playout en liste de matchs avec scores, noms et heure."""
     matches = data.get("matches", [])
     result = []
     for match in matches:
-        # Score final = dernier élément des goals
         goals = match.get("goals", [])
         if goals:
             last_goal = goals[-1]
@@ -212,21 +229,29 @@ def parse_scores(data) -> List[Dict[str, Any]]:
 
         home_team, away_team = extract_team_names(match)
 
+        # Heure de début : essayer plusieurs clés
+        start_time = (
+            match.get("startTime")
+            or match.get("date")
+            or match.get("scheduledStart")
+            or match.get("eventStart")
+            or match.get("expectedStart")
+        )
+        if start_time and str(start_time).startswith("0001-01-01"):
+            start_time = None
+
         result.append({
             "match_id": match.get("id"),
             "home_team": home_team,
             "away_team": away_team,
             "home_score": home_score,
             "away_score": away_score,
-            "expected_start": match.get("expectedStart")
+            "start_time": start_time,
         })
     return result
 
 async def find_active_round(client, event_id: str, parent_id: int, start_round: int = 1, max_round: int = 200):
-    """
-    Cherche la ronde active en partant de start_round.
-    Optimisation : si start_round est None, on utilise la dernière ronde connue.
-    """
+    """Cherche la ronde active à partir de start_round, en essayant aussi les rondes suivantes."""
     for round_num in range(start_round, max_round + 1):
         url = f"{BASE_URL}/round/{round_num}/playout"
         params = {"eventCategoryId": event_id, "parentEventCategoryId": parent_id}
@@ -245,30 +270,124 @@ async def get_scores_for_round(client, event_id: str, parent_id: int, round_num:
     if result.get("status_http") == 200 and result.get("data"):
         return parse_scores(result["data"])
     return None
+    # ------------------- STATISTIQUES PAR ÉQUIPE -------------------
+def compute_team_stats(history: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+    stats = {}
+    for match in history:
+        if not match.get("home_team") or not match.get("away_team"):
+            continue
+        home_team = match["home_team"]
+        away_team = match["away_team"]
+        home_goals = match["home_score"]
+        away_goals = match["away_score"]
 
-# ------------------- FONCTIONS DE PRÉDICTION -------------------
-def poisson_over_25_probability(avg_goals: float) -> float:
-    """Calcule la probabilité P(X >= 3) pour une loi de Poisson de paramètre lambda."""
-    if avg_goals <= 0:
-        return 0.0
-    # P(X < 3) = P(0) + P(1) + P(2)
-    p0 = math.exp(-avg_goals)
-    p1 = avg_goals * p0
-    p2 = (avg_goals ** 2 / 2) * p0
-    return 1 - (p0 + p1 + p2)
+        if home_team not in stats:
+            stats[home_team] = {"scored_home": [], "conceded_home": [], "scored_away": [], "conceded_away": []}
+        stats[home_team]["scored_home"].append(home_goals)
+        stats[home_team]["conceded_home"].append(away_goals)
 
-def check_rare_scores_gap(history: List[Dict[str, Any]], current_scores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Détecte les scores rares (ex: 4-0, 3-3, 4-1, etc.) non apparus depuis longtemps.
-    Retourne une liste d'alertes globales.
-    """
-    rare_scores = [
-        (4, 0), (0, 4), (3, 3), (4, 1), (1, 4),
-        (5, 0), (0, 5), (4, 2), (2, 4), (3, 4), (4, 3)
-    ]
-    # Compteur du nombre de matchs depuis la dernière apparition de chaque score rare
-    last_seen = {score: None for score in rare_scores}
-    # On parcourt l'historique du plus récent au plus ancien
+        if away_team not in stats:
+            stats[away_team] = {"scored_home": [], "conceded_home": [], "scored_away": [], "conceded_away": []}
+        stats[away_team]["scored_away"].append(away_goals)
+        stats[away_team]["conceded_away"].append(home_goals)
+
+    for team, s in stats.items():
+        s["avg_scored_home"] = sum(s["scored_home"]) / len(s["scored_home"]) if s["scored_home"] else 0
+        s["avg_conceded_home"] = sum(s["conceded_home"]) / len(s["conceded_home"]) if s["conceded_home"] else 0
+        s["avg_scored_away"] = sum(s["scored_away"]) / len(s["scored_away"]) if s["scored_away"] else 0
+        s["avg_conceded_away"] = sum(s["conceded_away"]) / len(s["conceded_away"]) if s["conceded_away"] else 0
+    return stats
+
+def poisson_prob(lam: float, k: int) -> float:
+    return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+def over_25_probability(lambda_total: float) -> float:
+    return 1 - (poisson_prob(lambda_total, 0) + poisson_prob(lambda_total, 1) + poisson_prob(lambda_total, 2))
+
+def exact_score_probability(lambda_home: float, lambda_away: float, h: int, a: int) -> float:
+    return poisson_prob(lambda_home, h) * poisson_prob(lambda_away, a)
+
+# ------------------- DÉTECTEURS DE RUPTURE -------------------
+def check_team_streaks(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    if not history:
+        return []
+    if not history[0].get("home_team"):
+        return []
+
+    chronological = list(reversed(history))
+    alerts = []
+    teams = {}
+
+    for match in chronological:
+        home_team = match["home_team"]
+        away_team = match["away_team"]
+        home_goals = match["home_score"]
+        away_goals = match["away_score"]
+
+        for team, scored, conceded in [(home_team, home_goals, away_goals), (away_team, away_goals, home_goals)]:
+            if team not in teams:
+                teams[team] = {
+                    "wins": 0, "losses": 0, "draws": 0,
+                    "no_goals_against": 0, "current_streak_win": 0,
+                    "current_streak_draw": 0, "current_streak_no_goal_against": 0,
+                }
+            if scored > conceded:
+                result = "win"
+            elif scored < conceded:
+                result = "loss"
+            else:
+                result = "draw"
+
+            if result == "win":
+                teams[team]["wins"] += 1
+                teams[team]["current_streak_win"] += 1
+                teams[team]["current_streak_draw"] = 0
+                teams[team]["current_streak_no_goal_against"] = 0
+            elif result == "draw":
+                teams[team]["draws"] += 1
+                teams[team]["current_streak_draw"] += 1
+                teams[team]["current_streak_win"] = 0
+                teams[team]["current_streak_no_goal_against"] = 0
+            else:
+                teams[team]["losses"] += 1
+                teams[team]["current_streak_win"] = 0
+                teams[team]["current_streak_draw"] = 0
+                teams[team]["current_streak_no_goal_against"] = 0
+
+            if conceded == 0:
+                teams[team]["no_goals_against"] += 1
+                teams[team]["current_streak_no_goal_against"] += 1
+            else:
+                teams[team]["current_streak_no_goal_against"] = 0
+
+            if teams[team]["current_streak_win"] >= STREAK_WINS:
+                alerts.append({
+                    "type": "win_streak",
+                    "message": f"🚨 Rupture imminente : {team} a gagné {teams[team]['current_streak_win']} matchs d'affilée. Pariez sur une défaite surprise ou qu'ils encaissent le premier but."
+                })
+            if teams[team]["current_streak_no_goal_against"] >= STREAK_NO_GOALS_AGAINST:
+                alerts.append({
+                    "type": "no_goals_against",
+                    "message": f"🛡️ {team} n'a pas encaissé de but depuis {teams[team]['current_streak_no_goal_against']} matchs. Risque de rupture, tentez qu'ils encaissent."
+                })
+            if teams[team]["current_streak_draw"] >= STREAK_NO_DRAW:
+                alerts.append({
+                    "type": "no_draw_streak",
+                    "message": f"⚖️ {team} n'a pas fait de match nul depuis {teams[team]['current_streak_draw']} matchs. Pénétration sur le X."
+                })
+
+    unique_alerts = []
+    seen = set()
+    for alert in alerts:
+        if alert["message"] not in seen:
+            seen.add(alert["message"])
+            unique_alerts.append(alert)
+    return unique_alerts
+
+def check_rare_scores_gap(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    if not history:
+        return []
+    last_seen = {score: None for score in RARE_SCORES}
     for i, match in enumerate(history):
         score = (match["home_score"], match["away_score"])
         if score in last_seen and last_seen[score] is None:
@@ -276,97 +395,53 @@ def check_rare_scores_gap(history: List[Dict[str, Any]], current_scores: List[Di
     alerts = []
     for score, gap in last_seen.items():
         if gap is not None and gap >= GAP_THRESHOLD:
-            home_goals, away_goals = score
+            h, a = score
             alerts.append({
                 "type": "rare_score_gap",
-                "message": f"🔥 Aucun score exact {home_goals}-{away_goals} depuis {gap} matchs. Tentez le score exact {home_goals}-{away_goals} ou {away_goals}-{home_goals}."
+                "message": f"🔥 Aucun score exact {h}-{a} depuis {gap} matchs. Tentez le score exact {h}-{a} ou {a}-{h}."
             })
     return alerts
 
-def check_team_streaks(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Détecte les séries de victoires consécutives par équipe.
-    Retourne des alertes si une équipe a gagné STREAK_THRESHOLD matchs d'affilée.
-    """
-    if not history:
-        return []
-    # On a besoin des noms d'équipes
-    if not history[0].get("home_team") or not history[0].get("away_team"):
-        return []
-    streaks = {}
-    last_team = None
-    count = 0
-    # Parcours dans l'ordre chronologique (du plus ancien au plus récent)
-    for match in reversed(history):
-        if match["home_score"] > match["away_score"]:
-            winner = match["home_team"]
-        elif match["home_score"] < match["away_score"]:
-            winner = match["away_team"]
-        else:
-            winner = None
-        if winner == last_team:
-            count += 1
-        else:
-            last_team = winner
-            count = 1 if winner else 0
-        if winner and count >= STREAK_THRESHOLD:
-            streaks[winner] = count
-    alerts = []
-    for team, streak in streaks.items():
-        alerts.append({
-            "type": "team_streak",
-            "message": f"🚨 Rupture statistique possible : {team} a gagné {streak} matchs d'affilée. Pariez sur une défaite surprise ou qu'ils encaissent le premier but (Cote 15+)."
-        })
-    return alerts
-
-def generate_predictions(league: str, current_scores: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Calcule toutes les prédictions pour la ronde en cours.
-    Retourne un dictionnaire avec des alertes globales et par match.
-    """
-    history = get_history(league, limit=200) # Historique plus large
+# ------------------- PRÉDICTIONS PAR MATCH -------------------
+def generate_predictions(league: str, current_matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    history = get_history(league, limit=200)
     if not history:
         return {"global": [], "per_match": []}
 
-    # Moyennes globales
+    team_stats = compute_team_stats(history)
+
     total_goals = sum(m["home_score"] + m["away_score"] for m in history)
     avg_goals = total_goals / len(history)
-    recent_5 = history[:5]
-    recent_avg = sum(m["home_score"] + m["away_score"] for m in recent_5) / len(recent_5)
 
     global_alerts = []
 
-    # Alerte Under/Over basée sur moyenne
     if avg_goals < 2.0:
-        global_alerts.append({
-            "type": "under",
-            "message": f"Moyenne faible sur {len(history)} matchs ({avg_goals:.1f} buts/match) → Pensez aux paris Under 2.5."
-        })
+        global_alerts.append({"type": "under", "message": f"Moyenne faible ({avg_goals:.1f} buts/match) → Pensez aux paris Under 2.5."})
     elif avg_goals > 3.5:
-        global_alerts.append({
-            "type": "over",
-            "message": f"Moyenne élevée ({avg_goals:.1f} buts/match) → Pensez aux paris Over 2.5."
-        })
+        global_alerts.append({"type": "over", "message": f"Moyenne élevée ({avg_goals:.1f} buts/match) → Pensez aux paris Over 2.5."})
 
-    # Tendance récente
-    if len(history) >= 5 and recent_avg < avg_goals * 0.7:
-        global_alerts.append({
-            "type": "trend_down",
-            "message": f"Tendance à la baisse sur les 5 derniers matchs ({recent_avg:.1f} vs {avg_goals:.1f}) → Possible match serré."
-        })
-
-    # Écarts de scores rares
-    global_alerts.extend(check_rare_scores_gap(history, current_scores))
-
-    # Séries d'équipes
     global_alerts.extend(check_team_streaks(history))
+    global_alerts.extend(check_rare_scores_gap(history))
 
-    # Prédictions par match (Poisson pour +2.5 buts)
-    per_match_predictions = []
-    for match in current_scores:
+    per_match = []
+    for match in current_matches:
         match_predictions = []
-        # Calcul de la probabilité Over 2.5 pour ce match (utilisation de la moyenne globale)
-        prob_over = poisson_over_25_probability(avg_goals)
+        home_team = match.get("home_team")
+        away_team = match.get("away_team")
+
+        if home_team and away_team and home_team in team_stats and away_team in team_stats:
+            home_stats = team_stats[home_team]
+            away_stats = team_stats[away_team]
+            lambda_home = (home_stats["avg_scored_home"] + away_stats["avg_conceded_away"]) / 2
+            lambda_away = (away_stats["avg_scored_away"] + home_stats["avg_conceded_home"]) / 2
+            lambda_total = lambda_home + lambda_away
+        else:
+            lambda_total = avg_goals
+            lambda_home = lambda_total / 2
+            lambda_away = lambda_total / 2
+
+        prob_over = over_25_probability(lambda_total)
+
         if prob_over > POISSON_OVER_25_THRESHOLD:
             match_predictions.append({
                 "type": "open_match",
@@ -378,26 +453,23 @@ def generate_predictions(league: str, current_scores: List[Dict[str, Any]]) -> D
                 "message": f"Prédiction : Match Fermé (-2.5 buts) à {(1-prob_over)*100:.0f}%"
             })
 
-        # Alerte si le match actuel est à 0-0 ou 1 but (peut évoluer)
-        total = match["home_score"] + match["away_score"]
-        if total == 0:
-            match_predictions.append({
-                "type": "no_goal",
-                "message": "0-0 pour l'instant → Under intéressant"
-            })
-        elif total <= 1:
-            match_predictions.append({
-                "type": "low_scoring",
-                "message": "Score faible → Attention au nul"
-            })
+        total_goals_current = match["home_score"] + match["away_score"]
+        if total_goals_current == 0:
+            match_predictions.append({"type": "no_goal", "message": "0-0 pour l'instant → Under intéressant"})
+        elif total_goals_current <= 1:
+            match_predictions.append({"type": "low_scoring", "message": "Score faible → Attention au nul"})
 
-        per_match_predictions.append({
-            "match_id": match["match_id"],
-            "predictions": match_predictions
-        })
+        for h, a in RARE_SCORES:
+            prob = exact_score_probability(lambda_home, lambda_away, h, a)
+            if prob > 0.02:
+                match_predictions.append({
+                    "type": "exact_score",
+                    "message": f"🎯 Grosse cote possible : score exact {h}-{a} (prob {prob*100:.1f}%)"
+                })
 
-    return {"global": global_alerts, "per_match": per_match_predictions}
+        per_match.append({"match_id": match["match_id"], "predictions": match_predictions})
 
+    return {"global": global_alerts, "per_match": per_match}
 # ------------------- INITIALISATION -------------------
 @app.on_event("startup")
 async def startup_event():
@@ -406,7 +478,7 @@ async def startup_event():
 # ------------------- ENDPOINTS API -------------------
 @app.get("/")
 def root():
-    return {"message": "API Tableau de Bord Bet261 V3 en ligne"}
+    return {"message": "API Tableau de Bord Bet261 V3.1 en ligne"}
 
 @app.get("/api/leagues")
 async def get_leagues():
@@ -424,41 +496,36 @@ async def api_dashboard(
     event_id = league_info["event_id"]
     parent_id = league_info["parent_id"]
 
-    # Déterminer la ronde de départ
+    last_round = get_last_round(league)
     if start_round is None:
-        last_round = get_last_round(league)
-        start_round = max(1, (last_round - 2) if last_round else 1)
+        if last_round:
+            start_round = max(1, last_round - 1)
+        else:
+            start_round = 1
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        active_round = await find_active_round(client, event_id, parent_id, start_round)
+        active_round = await find_active_round(client, event_id, parent_id, start_round, max_round=200)
         if active_round is None:
-            return {
-                "league": league,
-                "error": "Aucune ronde active trouvée",
-                "status": "error"
-            }
+            active_round = await find_active_round(client, event_id, parent_id, 1, max_round=200)
+            if active_round is None:
+                return {"league": league, "error": "Aucune ronde active trouvée", "status": "error"}
 
         match_data = await get_scores_for_round(client, event_id, parent_id, active_round)
         if match_data is None:
-            return {
-                "league": league,
-                "round": active_round,
-                "error": "Impossible de récupérer les scores",
-                "status": "error"
-            }
+            return {"league": league, "round": active_round, "error": "Impossible de récupérer les scores", "status": "error"}
 
-        # Sauvegarde dans l'historique
         save_matches(league, active_round, match_data)
-
-        # Prédictions
         predictions = generate_predictions(league, match_data)
 
-        # Ajouter l'heure estimée pour chaque match (si expectedStart absent)
         for m in match_data:
-            if not m.get("expected_start") or m["expected_start"].startswith("0001"):
-                m["display_time"] = f"Ronde {active_round} (en cours)"
+            if m.get("start_time"):
+                try:
+                    dt = datetime.fromisoformat(m["start_time"].replace("Z", "+00:00"))
+                    m["display_time"] = dt.strftime("%H:%M")
+                except:
+                    m["display_time"] = str(m["start_time"])
             else:
-                m["display_time"] = m["expected_start"]
+                m["display_time"] = datetime.utcnow().strftime("%H:%M")
 
         return {
             "league": league,
@@ -470,6 +537,16 @@ async def api_dashboard(
             "status": "ok"
         }
 
+@app.get("/debug")
+async def debug_match(round_num: int, event_id: str, parent_id: int = 8035):
+    url = f"{BASE_URL}/round/{round_num}/playout"
+    params = {"eventCategoryId": event_id, "parentEventCategoryId": parent_id}
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        result = await fetch_json(client, url, params)
+        if result.get("data") and "matches" in result["data"]:
+            return {"premier_match": result["data"]["matches"][0]}
+        return result
+
 # ------------------- INTERFACE WEB -------------------
 @app.get("/dashboard")
 async def web_dashboard():
@@ -479,7 +556,7 @@ async def web_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>Bet261 Virtual Dashboard V3</title>
+        <title>Bet261 Virtual Dashboard V3.1</title>
         <style>
             body {
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -527,6 +604,29 @@ async def web_dashboard():
                 background: #f8d7da;
                 color: #721c24;
             }
+            .global-alerts {
+                background: #f8f9fa;
+                border-radius: 12px;
+                padding: 15px;
+                margin-bottom: 20px;
+            }
+            .global-alerts h2 {
+                font-size: 18px;
+                margin-top: 0;
+                color: #333;
+            }
+            .alert-item {
+                margin-bottom: 10px;
+                padding: 10px;
+                border-radius: 8px;
+                background: white;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+                font-size: 14px;
+                border-left: 4px solid #ffc107;
+            }
+            .alert-item.danger {
+                border-left-color: #dc3545;
+            }
             .match-card {
                 background: white;
                 border-radius: 12px;
@@ -568,25 +668,6 @@ async def web_dashboard():
                 color: #721c24;
                 border-left-color: #dc3545;
             }
-            .global-alerts {
-                background: #f8f9fa;
-                border-radius: 12px;
-                padding: 15px;
-                margin-bottom: 20px;
-            }
-            .global-alerts h2 {
-                font-size: 18px;
-                margin-top: 0;
-                color: #333;
-            }
-            .alert-item {
-                margin-bottom: 10px;
-                padding: 10px;
-                border-radius: 8px;
-                background: white;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-                font-size: 14px;
-            }
             .refresh-info {
                 text-align: center;
                 font-size: 12px;
@@ -597,7 +678,7 @@ async def web_dashboard():
     </head>
     <body>
         <div class="container">
-            <h1>⚽ Dashboard V3</h1>
+            <h1>⚽ Dashboard V3.1</h1>
             <div class="subtitle">Prédictions & Grosses Cotes</div>
 
             <select id="leagueSelect" onchange="loadDashboard()">
@@ -647,18 +728,16 @@ async def web_dashboard():
                         statusEl.className = 'status status-ok';
                         statusEl.textContent = `✅ Ronde ${data.round} - ${data.matches.length} matchs`;
 
-                        // Alertes globales
                         let globalHtml = '';
                         if (data.global_predictions.length > 0) {
                             globalHtml = '<div class="global-alerts"><h2>🚨 Alertes Globales</h2>';
                             data.global_predictions.forEach(alert => {
-                                globalHtml += `<div class="alert-item">${alert.message}</div>`;
+                                globalHtml += `<div class="alert-item ${alert.type.includes('rare') || alert.type.includes('streak') ? 'danger' : ''}">${alert.message}</div>`;
                             });
                             globalHtml += '</div>';
                         }
                         document.getElementById('globalAlertsContainer').innerHTML = globalHtml;
 
-                        // Matchs
                         const matchesHtml = data.matches.map(match => {
                             const teamDisplay = match.home_team && match.away_team
                                 ? `${match.home_team} vs ${match.away_team}`
@@ -666,12 +745,11 @@ async def web_dashboard():
                             const score = `${match.home_score} - ${match.away_score}`;
                             const time = match.display_time || '';
 
-                            // Prédictions pour ce match
                             const matchPreds = data.per_match_predictions.find(p => p.match_id === match.match_id);
                             let predsHtml = '';
                             if (matchPreds) {
                                 matchPreds.predictions.forEach(pred => {
-                                    predsHtml += `<div class="prediction-badge ${pred.type === 'rare_score_gap' || pred.type === 'team_streak' ? 'danger' : ''}">${pred.message}</div>`;
+                                    predsHtml += `<div class="prediction-badge ${pred.type === 'exact_score' || pred.type === 'rare_score_gap' ? 'danger' : ''}">${pred.message}</div>`;
                                 });
                             }
 
