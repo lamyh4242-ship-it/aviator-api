@@ -221,30 +221,39 @@ def parse_scores(data) -> List[Dict[str, Any]]:
     return result
 
 async def fetch_schedule_mapping(client, event_id: str, parent_id: int, round_num: int) -> Dict[str, Dict[str, Any]]:
-    url = f"{BASE_URL}/round/{round_num}"
-    params = {"eventCategoryId": event_id, "getNext": "false"}
-    result = await fetch_json(client, url, params)
+    """
+    Récupère la grille d'une ronde en testant getNext=false puis getNext=true.
+    Retourne un mapping {match_id: {"home_team": ..., "away_team": ..., "start_time": ...}}
+    """
+    for get_next in ["false", "true"]:
+        url = f"{BASE_URL}/round/{round_num}"
+        params = {"eventCategoryId": event_id, "getNext": get_next}
+        result = await fetch_json(client, url, params)
 
-    if result.get("status_http") != 200 or not result.get("data"):
-        return {}
-
-    data = result["data"]
-    if isinstance(data, dict) and "data" in data:
-        data = data["data"]
-
-    matches = data if isinstance(data, list) else data.get("events") or data.get("matches") or data.get("fixtures") or []
-    if not isinstance(matches, list):
-        return {}
-
-    mapping = {}
-    for m in matches:
-        mid = m.get("id") or m.get("matchId") or m.get("eventId")
-        if not mid:
+        if result.get("status_http") != 200 or not result.get("data"):
             continue
-        home, away = extract_team_names_from_obj(m)
-        start = extract_start_time(m)
-        mapping[str(mid)] = {"home_team": home, "away_team": away, "start_time": start}
-    return mapping
+
+        data = result["data"]
+        if isinstance(data, dict) and "data" in data:
+            data = data["data"]
+
+        matches = data if isinstance(data, list) else data.get("events") or data.get("matches") or data.get("fixtures") or []
+        if not isinstance(matches, list):
+            continue
+
+        mapping = {}
+        for m in matches:
+            mid = m.get("id") or m.get("matchId") or m.get("eventId")
+            if not mid:
+                continue
+            home, away = extract_team_names_from_obj(m)
+            start = extract_start_time(m)
+            mapping[str(mid)] = {"home_team": home, "away_team": away, "start_time": start}
+
+        if mapping:
+            return mapping
+
+    return {}
 
 async def get_future_matches(client, event_id: str, parent_id: int, round_num: int) -> List[Dict[str, Any]]:
     mapping = await fetch_schedule_mapping(client, event_id, parent_id, round_num)
@@ -453,26 +462,41 @@ async def api_dashboard(
         start_round = max(1, (last_round - 1)) if last_round else 1
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
+        # 1. Identifier la ronde actuellement jouée
         active_round = await find_active_round(client, event_id, parent_id, start_round, max_round=200)
         if active_round is None:
             active_round = await find_active_round(client, event_id, parent_id, 1, max_round=200)
             if active_round is None:
                 return {"league": league, "error": "Aucune ronde active détectée", "status": "error"}
 
+        # 2. Sauvegarde silencieuse de la ronde actuelle pour le modèle prédictif
         current_match_data = await get_scores_for_round(client, event_id, parent_id, active_round)
         if current_match_data:
             save_matches(league, active_round, current_match_data)
 
+        # 3. Tentative de récupération de la ronde FUTURE (N+1)
         future_round = active_round + 1
         future_match_data = await get_future_matches(client, event_id, parent_id, future_round)
 
+        # Fallback : si la ronde future n'est pas disponible, on utilise la ronde courante
         if not future_match_data:
-            return {"league": league, "round": future_round, "error": "Chargement du calendrier futur...", "status": "error"}
+            display_round = active_round
+            display_match_data = current_match_data if current_match_data else await get_future_matches(client, event_id, parent_id, active_round)
+            fallback_note = "Ronde future non disponible, affichage de la ronde en cours."
+        else:
+            display_round = future_round
+            display_match_data = future_match_data
+            fallback_note = ""
 
-        predictions = generate_predictions(league, future_match_data)
+        if not display_match_data:
+            return {"league": league, "round": display_round, "error": "Aucune donnée de match disponible.", "status": "error"}
 
+        # 4. Génération des prédictions sur la ronde affichée
+        predictions = generate_predictions(league, display_match_data)
+
+        # 5. Formatage horaire
         tz = ZoneInfo("Indian/Antananarivo")
-        for m in future_match_data:
+        for m in display_match_data:
             if m.get("start_time"):
                 try:
                     dt = datetime.fromisoformat(m["start_time"].replace("Z", "+00:00"))
@@ -480,16 +504,17 @@ async def api_dashboard(
                 except:
                     m["display_time"] = str(m["start_time"])
             else:
-                m["display_time"] = "À venir"
+                m["display_time"] = "À venir" if display_round != active_round else "En cours"
 
         return {
             "league": league,
-            "round": future_round,
-            "matches": future_match_data,
+            "round": display_round,
+            "matches": display_match_data,
             "global_predictions": predictions["global"],
             "per_match_predictions": predictions["per_match"],
             "timestamp": datetime.utcnow().isoformat(),
-            "status": "ok"
+            "status": "ok",
+            "note": fallback_note
         }
 
 # ------------------- INTERFACE WEB -------------------
