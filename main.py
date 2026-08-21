@@ -12,9 +12,9 @@ except ImportError:
 app = FastAPI()
 
 # ------------------- CONFIGURATION DES LIGUES -------------------
-# Mettez à jour les event_id si nécessaire (ex: English League peut être 161860)
+# ⚠️ Mettez à jour les IDs si nécessaire (vérifiez sur le site)
 LEAGUES = {
-    "English League": {"event_id": "161777", "parent_id": 8035}, # ⚠️ Vérifiez si c'est 161860
+    "English League": {"event_id": "161860", "parent_id": 8035}, # ID corrigé
     "Champions League": {"event_id": "161771", "parent_id": 8056},
     "CAN": {"event_id": "161778", "parent_id": 8060},
     "Coupe du Monde": {"event_id": "161758", "parent_id": 8065},
@@ -25,7 +25,7 @@ LEAGUES = {
     "Portugal League": {"event_id": "161781", "parent_id": 8044},
 }
 
-# Mapping statique de secours (complétez si nécessaire)
+# Mapping statique de secours (complétez si besoin)
 TEAM_NAME_MAP = {
     # "76503347": "Leeds United",
 }
@@ -45,17 +45,6 @@ GAP_THRESHOLD = 40
 STREAK_NO_GOALS_AGAINST = 4
 STREAK_NO_DRAW = 5
 STREAK_WINS = 5
-
-# Endpoints probables pour la grille (à ajuster selon vos trouvailles)
-SCHEDULE_ENDPOINTS = [
-    "/api/instantleagues/round/{round}/fixtures",
-    "/api/instantleagues/round/{round}/events",
-    "/api/instantleagues/round/{round}/schedule",
-    "/api/instantleagues/round/{round}",
-    "/api/instantleagues/events",
-    "/api/instantleagues/fixtures",
-    "/api/instantleagues/schedule",
-]
 
 # ------------------- BASE DE DONNÉES -------------------
 def init_db():
@@ -177,7 +166,7 @@ async def fetch_json(client, url, params=None, retries=3):
     return {"error": "Échec après plusieurs tentatives"}
 
 def extract_team_names_from_obj(obj: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """Essaie d'extraire home/away à partir d'un objet match (grille ou playout)."""
+    """Extrait home/away depuis un objet match (grille ou playout)."""
     home = away = None
     # homeTeam / awayTeam
     if isinstance(obj.get("homeTeam"), dict):
@@ -248,40 +237,37 @@ def parse_scores(data) -> List[Dict[str, Any]]:
         })
     return result
 
-async def fetch_schedule_mapping(client, event_id: str, parent_id: int, round_num: int) -> Tuple[Dict[str, Dict[str, Any]], Optional[str]]:
+async def fetch_schedule_mapping(client, event_id: str, parent_id: int, round_num: int) -> Dict[str, Dict[str, Any]]:
     """
-    Essaie plusieurs endpoints pour récupérer la grille (noms + heures).
-    Retourne un mapping {match_id: {"home_team": ..., "away_team": ..., "start_time": ...}}.
+    Appelle l'endpoint exact de la grille :
+    GET /api/instantleagues/round/{round}?eventCategoryId={event_id}&getNext=false
+    Retourne un mapping {match_id: {"home_team": ..., "away_team": ..., "start_time": ...}}
     """
-    for endpoint in SCHEDULE_ENDPOINTS:
-        url = BASE_URL + endpoint.format(round=round_num)
-        params = {}
-        if "{round}" not in endpoint:
-            # si pas de round dans l'URL, on l'ajoute en query param
-            params["eventCategoryId"] = event_id
-            params["parentEventCategoryId"] = parent_id
-            params["round"] = round_num
-        else:
-            params["eventCategoryId"] = event_id
-            params["parentEventCategoryId"] = parent_id
+    url = f"{BASE_URL}/round/{round_num}"
+    params = {
+        "eventCategoryId": event_id,
+        "getNext": "false"
+    }
+    result = await fetch_json(client, url, params)
+    if result.get("status_http") != 200 or not result.get("data"):
+        return {}
 
-        result = await fetch_json(client, url, params)
-        if result.get("status_http") == 200 and result.get("data"):
-            data = result["data"]
-            matches = data.get("matches") or data.get("events") or data.get("fixtures") or []
-            if not isinstance(matches, list):
-                continue
-            mapping = {}
-            for m in matches:
-                mid = m.get("id") or m.get("matchId") or m.get("eventId")
-                if not mid:
-                    continue
-                home, away = extract_team_names_from_obj(m)
-                start = extract_start_time(m)
-                mapping[str(mid)] = {"home_team": home, "away_team": away, "start_time": start}
-            if mapping:
-                return mapping, url
-    return {}, None
+    data = result["data"]
+    # La structure peut être une liste directe ou sous une clé (matches, events, fixtures)
+    matches = data if isinstance(data, list) else data.get("matches") or data.get("events") or data.get("fixtures") or []
+    if not isinstance(matches, list):
+        return {}
+
+    mapping = {}
+    for m in matches:
+        # L'identifiant du match peut être dans 'id' ou 'matchId' ou 'eventId'
+        mid = m.get("id") or m.get("matchId") or m.get("eventId")
+        if not mid:
+            continue
+        home, away = extract_team_names_from_obj(m)
+        start = extract_start_time(m)
+        mapping[str(mid)] = {"home_team": home, "away_team": away, "start_time": start}
+    return mapping
 
 async def find_active_round(client, event_id: str, parent_id: int, start_round: int = 1, max_round: int = 200):
     for round_num in range(start_round, max_round + 1):
@@ -296,8 +282,8 @@ async def find_active_round(client, event_id: str, parent_id: int, start_round: 
     return None
 
 async def get_scores_for_round(client, event_id: str, parent_id: int, round_num: int) -> Optional[List[Dict[str, Any]]]:
-    # 1. Récupérer la grille (noms + heures)
-    mapping, schedule_url = await fetch_schedule_mapping(client, event_id, parent_id, round_num)
+    # 1. Récupérer la grille (noms + heures) via l'endpoint exact
+    mapping = await fetch_schedule_mapping(client, event_id, parent_id, round_num)
 
     # 2. Récupérer les scores depuis /playout
     url = f"{BASE_URL}/round/{round_num}/playout"
@@ -354,8 +340,7 @@ def over_25_probability(lambda_total: float) -> float:
 
 def exact_score_probability(lambda_home: float, lambda_away: float, h: int, a: int) -> float:
     return poisson_prob(lambda_home, h) * poisson_prob(lambda_away, a)
-
-# ------------------- DÉTECTEURS DE RUPTURE -------------------
+    # ------------------- DÉTECTEURS DE RUPTURE -------------------
 def check_team_streaks(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     if not history:
         return []
@@ -518,7 +503,8 @@ def generate_predictions(league: str, current_matches: List[Dict[str, Any]]) -> 
         per_match.append({"match_id": match["match_id"], "predictions": match_predictions})
 
     return {"global": global_alerts, "per_match": per_match}
-    # ------------------- INITIALISATION -------------------
+
+# ------------------- INITIALISATION -------------------
 @app.on_event("startup")
 async def startup_event():
     init_db()
@@ -531,42 +517,6 @@ def root():
 @app.get("/api/leagues")
 async def get_leagues():
     return [{"name": name} for name in LEAGUES.keys()]
-
-@app.get("/debug")
-async def debug_match(round_num: int, event_id: str, parent_id: int = 8035):
-    url = f"{BASE_URL}/round/{round_num}/playout"
-    params = {"eventCategoryId": event_id, "parentEventCategoryId": parent_id}
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        result = await fetch_json(client, url, params)
-        if result.get("data") and "matches" in result["data"]:
-            return {"premier_match": result["data"]["matches"][0]}
-        return result
-
-@app.get("/probe")
-async def probe_endpoints(round_num: int, event_id: str, parent_id: int = 8035):
-    """Teste plusieurs endpoints de grille et retourne le premier qui contient des noms."""
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        for endpoint in SCHEDULE_ENDPOINTS:
-            url = BASE_URL + endpoint.format(round=round_num)
-            params = {}
-            if "{round}" not in endpoint:
-                params["eventCategoryId"] = event_id
-                params["parentEventCategoryId"] = parent_id
-                params["round"] = round_num
-            else:
-                params["eventCategoryId"] = event_id
-                params["parentEventCategoryId"] = parent_id
-            result = await fetch_json(client, url, params)
-            if result.get("status_http") == 200 and result.get("data"):
-                data = result["data"]
-                matches = data.get("matches") or data.get("events") or data.get("fixtures") or []
-                if isinstance(matches, list) and len(matches) > 0:
-                    # Vérifier si le premier match a des noms
-                    home, away = extract_team_names_from_obj(matches[0])
-                    if home or away:
-                        return {"endpoint": url, "premier_match": matches[0]}
-            await asyncio.sleep(0.3)
-    return {"message": "Aucun endpoint avec noms trouvé. Inspectez le réseau du site pour trouver le bon endpoint."}
 
 @app.get("/api/dashboard")
 async def api_dashboard(
@@ -602,7 +552,7 @@ async def api_dashboard(
         predictions = generate_predictions(league, match_data)
 
         # Formater l'heure en fuseau Indian/Antananarivo (UTC+3)
-        tz = ZoneInfo("Indian/Antananarivo") if callable(ZoneInfo) else ZoneInfo("Indian/Antananarivo")
+        tz = ZoneInfo("Indian/Antananarivo")
         for m in match_data:
             if m.get("start_time"):
                 try:
@@ -624,7 +574,6 @@ async def api_dashboard(
             "timestamp": datetime.utcnow().isoformat(),
             "status": "ok"
         }
-
 # ------------------- INTERFACE WEB -------------------
 @app.get("/dashboard")
 async def web_dashboard():
